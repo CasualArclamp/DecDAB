@@ -1,0 +1,23 @@
+# made by CasualArclamp
+[package]
+name = "decdab-engine"
+description = "DecDAB engine: the receive thread (spectrum rows, levels, the DAB receiver, the chosen service's sound and PAD), CPU meters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decdab-core = { path = "../decdab-core" }
+decdab-io = { path = "../decdab-io" }
+decdab-ofdm = { path = "../decdab-ofdm" }
+decdab-fic = { path = "../decdab-fic" }
+decdab-msc = { path = "../decdab-msc" }
+decdab-codecs = { path = "../decdab-codecs" }
+decdab-data = { path = "../decdab-data" }
+decdab-audio = { path = "../decdab-audio" }
+rustfft.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

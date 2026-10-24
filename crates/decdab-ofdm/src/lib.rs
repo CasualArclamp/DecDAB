@@ -13,5 +13,5 @@ pub mod frontend;
 pub mod params;
 pub mod tables;
 
-pub use demod::{Demod, Frame, FrameStats};
+pub use demod::{Demod, Echo, Frame, FrameStats, Scope};
 pub use frontend::Frontend;

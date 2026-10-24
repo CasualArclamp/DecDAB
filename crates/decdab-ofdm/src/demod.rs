@@ -66,6 +66,37 @@ pub struct FrameStats {
     pub frame: u64,
 }
 
+/// An echo in the impulse response.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Echo {
+    /// Delay from the first path, µs.
+    pub delay_us: f32,
+    /// Level against the strongest path, dB.
+    pub db: f32,
+}
+
+/// What the scopes show of a frame, made only while they are asked for.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    /// Differential (DQPSK) points of the FIC symbols and of some MSC
+    /// symbols, at unit mean amplitude: the ideal points are at ±45°, ±135°.
+    pub fic: Vec<Iq>,
+    pub msc: Vec<Iq>,
+    /// Per active carrier (k = −768…768 less 0): its frequency from the
+    /// centre (MHz), the channel's gain from the phase reference (dB about
+    /// the mean) and the DQPSK signal-to-noise ratio over the frame (dB).
+    pub freq_mhz: Vec<f32>,
+    pub gain_db: Vec<f32>,
+    pub snr_db: Vec<f32>,
+    pub mean_snr_db: f32,
+    /// The impulse response (dB about its peak) against delay from the
+    /// first path (µs), the guard interval, and the strongest echoes.
+    pub delay_us: Vec<f32>,
+    pub impulse_db: Vec<f32>,
+    pub guard_us: f32,
+    pub echoes: Vec<Echo>,
+}
+
 /// A demodulated transmission frame.
 pub struct Frame<'a> {
     /// Soft bits of the 75 data symbols, 3072 each, in the order of
@@ -76,6 +107,8 @@ pub struct Frame<'a> {
     /// symbol, for the scopes (k = −768…−1, 1…768).
     pub last_diff: &'a [Iq],
     pub stats: FrameStats,
+    /// The scopes' view of it, while [`Demod::set_scopes`] is on.
+    pub scope: Option<&'a Scope>,
 }
 
 enum State {
@@ -102,6 +135,11 @@ pub struct Demod {
     /// QPSK symbol n it carries.
     n_of: Vec<u16>,
     frames: u64,
+    scopes_on: bool,
+    scope: Scope,
+    /// Per carrier, the frame's DQPSK error and signal power.
+    err: Vec<f32>,
+    sig: Vec<f32>,
 }
 
 /// Index of carrier k among the active ones (−768 → 0, 768 → 1535).
@@ -153,7 +191,16 @@ impl Demod {
             soft: vec![0; DATA_SYMBOLS * BITS_PER_SYMBOL],
             n_of,
             frames: 0,
+            scopes_on: false,
+            scope: Scope::default(),
+            err: vec![0.0; CARRIERS],
+            sig: vec![0.0; CARRIERS],
         }
+    }
+
+    /// Make each frame's [`Scope`] (costs a little; off by default).
+    pub fn set_scopes(&mut self, on: bool) {
+        self.scopes_on = on;
     }
 
     pub fn is_locked(&self) -> bool {
@@ -331,6 +378,25 @@ impl Demod {
         // The phase reference, and from it the impulse response.
         self.spectrum(sym(0));
         Self::carriers(&self.work, &mut self.prev);
+        if self.scopes_on {
+            let sc = &mut self.scope;
+            sc.fic.clear();
+            sc.msc.clear();
+            let mean = self.prev.iter().map(|z| z.norm_sqr()).sum::<f32>() / CARRIERS as f32;
+            sc.gain_db.clear();
+            sc.gain_db.extend(
+                self.prev
+                    .iter()
+                    .map(|z| 10.0 * (z.norm_sqr() / mean.max(1e-30)).max(1e-6).log10()),
+            );
+            if sc.freq_mhz.len() != CARRIERS {
+                sc.freq_mhz = (0..CARRIERS)
+                    .map(|i| carrier_of(i) as f32 * 1e-3)
+                    .collect();
+            }
+            self.err.fill(0.0);
+            self.sig.fill(0.0);
+        }
         let p = prs_bins();
         for (w, q) in self.work.iter_mut().zip(p.iter()) {
             *w *= q.conj();
@@ -370,6 +436,31 @@ impl Demod {
             // Wanted at ADVANCE; move by whole samples, at most a guard's
             // worth at a time.
             step = (first - ADVANCE as i32).clamp(-(GUARD as i32), GUARD as i32);
+            if self.scopes_on {
+                let us = 1e6 / SAMPLE_RATE as f32;
+                let sc = &mut self.scope;
+                sc.delay_us.clear();
+                sc.impulse_db.clear();
+                sc.guard_us = GUARD as f32 * us;
+                let (from, to) = (first - 40, first + GUARD as i32 + 120);
+                for d in from..to {
+                    let v = pow[d.rem_euclid(FFT as i32) as usize];
+                    sc.delay_us.push((d - first) as f32 * us);
+                    sc.impulse_db.push(10.0 * (v / peak).max(1e-7).log10());
+                }
+                // Echoes: local peaks within 25 dB of the strongest.
+                let db = &sc.impulse_db;
+                let mut peaks: Vec<Echo> = (1..db.len().saturating_sub(1))
+                    .filter(|&i| db[i] > -25.0 && db[i] >= db[i - 1] && db[i] > db[i + 1])
+                    .map(|i| Echo {
+                        delay_us: sc.delay_us[i],
+                        db: db[i],
+                    })
+                    .collect();
+                peaks.sort_by(|a, b| b.db.total_cmp(&a.db));
+                peaks.truncate(6);
+                sc.echoes = peaks;
+            }
         }
 
         // The data symbols.
@@ -393,6 +484,12 @@ impl Demod {
             let derot = Iq::from_polar(1.0, -cpe);
             let scale = SOFT_SCALE * CARRIERS as f32 / amp.max(1e-30);
             let base = (l - 1) * BITS_PER_SYMBOL;
+            let scopes_on = self.scopes_on;
+            // Which symbols the scopes take, and how sparsely.
+            let take = match l {
+                1..=3 | 20 | 40 | 60 => 2,
+                _ => 0,
+            };
             for (i, (d, p)) in self.diff.iter_mut().zip(&self.prev).enumerate() {
                 // d/|prev|: the new carrier's amplitude, the phase step.
                 let z = *d * derot / p.norm().max(1e-30) * scale;
@@ -403,8 +500,21 @@ impl Demod {
                 // MER against the nearest QPSK point.
                 let a = z.norm() * std::f32::consts::FRAC_1_SQRT_2;
                 let ideal = Iq::new(a.copysign(z.re), a.copysign(z.im));
-                err_acc += (z - ideal).norm_sqr() as f64;
-                sig_acc += ideal.norm_sqr() as f64;
+                let (e, g) = ((z - ideal).norm_sqr(), ideal.norm_sqr());
+                err_acc += e as f64;
+                sig_acc += g as f64;
+                if scopes_on {
+                    self.err[i] += e;
+                    self.sig[i] += g;
+                    if take > 0 && i % take == 0 {
+                        let pt = z / SOFT_SCALE;
+                        if l <= 3 {
+                            self.scope.fic.push(pt);
+                        } else {
+                            self.scope.msc.push(pt);
+                        }
+                    }
+                }
             }
             std::mem::swap(&mut self.cur, &mut self.prev);
         }
@@ -413,6 +523,17 @@ impl Demod {
             * (SAMPLE_RATE / SYMBOL as f64);
         let mer_db = (10.0 * (sig_acc / err_acc.max(1e-30)).log10()) as f32;
 
+        if self.scopes_on {
+            let sc = &mut self.scope;
+            sc.snr_db.clear();
+            sc.snr_db.extend(
+                self.err
+                    .iter()
+                    .zip(&self.sig)
+                    .map(|(e, g)| 10.0 * (g / e.max(1e-30)).max(1e-3).log10()),
+            );
+            sc.mean_snr_db = mer_db;
+        }
         let stats = FrameStats {
             cfo_hz: self.cfo,
             timing_step: step,
@@ -426,6 +547,7 @@ impl Demod {
                 soft: &self.soft,
                 last_diff: &self.diff,
                 stats,
+                scope: self.scopes_on.then_some(&self.scope),
             });
             // Steer half the residual: the samples already buffered keep the
             // old correction, which the per-symbol turn absorbs.

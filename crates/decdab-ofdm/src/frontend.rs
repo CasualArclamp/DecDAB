@@ -78,6 +78,10 @@ enum Chain {
 pub struct Frontend {
     chain: Chain,
     in_rate: f64,
+    /// The NCO that brings an ensemble off the centre to DC: its phasor and
+    /// step, when there is an offset.
+    nco: Option<(Iq, Iq)>,
+    mixed: Vec<Iq>,
 }
 
 impl Frontend {
@@ -90,7 +94,32 @@ impl Frontend {
         } else {
             Chain::Resample(Box::new(Resampler::for_rates(in_rate, SAMPLE_RATE, 1.6e6)?))
         };
-        Ok(Frontend { chain, in_rate })
+        Ok(Frontend {
+            chain,
+            in_rate,
+            nco: None,
+            mixed: Vec::new(),
+        })
+    }
+
+    /// For an ensemble `offset_hz` from the centre of samples at `in_rate`.
+    pub fn with_offset(in_rate: f64, offset_hz: f64) -> Result<Frontend, String> {
+        if offset_hz.abs() + 0.8e6 > in_rate / 2.0 {
+            return Err(format!(
+                "an ensemble {:.3} MHz off centre is outside a {:.3} MS/s span",
+                offset_hz / 1e6,
+                in_rate / 1e6
+            ));
+        }
+        let mut f = Frontend::new(in_rate)?;
+        if offset_hz != 0.0 {
+            let step = Iq::from_polar(
+                1.0,
+                (-std::f64::consts::TAU * offset_hz / in_rate) as f32,
+            );
+            f.nco = Some((Iq::new(1.0, 0.0), step));
+        }
+        Ok(f)
     }
 
     pub fn in_rate(&self) -> f64 {
@@ -100,6 +129,21 @@ impl Frontend {
     /// Decimate `input` into `out` (cleared first).
     pub fn process(&mut self, input: &[Iq], out: &mut Vec<Iq>) {
         out.clear();
+        let mut mixed = std::mem::take(&mut self.mixed);
+        let input = match &mut self.nco {
+            Some((ph, step)) => {
+                mixed.clear();
+                for (i, s) in input.iter().enumerate() {
+                    mixed.push(s * *ph);
+                    *ph *= *step;
+                    if i % 1024 == 1023 {
+                        *ph /= ph.norm();
+                    }
+                }
+                &mixed[..]
+            }
+            None => input,
+        };
         match &mut self.chain {
             Chain::Halfbands(stages, tmp) if stages.is_empty() => {
                 let _ = tmp;
@@ -121,6 +165,7 @@ impl Frontend {
             }
             Chain::Resample(r) => r.process(input, out),
         }
+        self.mixed = mixed;
     }
 }
 
