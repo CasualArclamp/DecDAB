@@ -61,6 +61,23 @@ pub fn run(what: &str, seconds: f64, gains: Gains) -> Result<()> {
         read as f64 / rate,
         t0.elapsed().as_secs_f64()
     );
+    let c = &fic.counts;
+    let list = |name: &str, v: &[u64]| -> String {
+        v.iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(e, n)| format!("{name}/{e}×{n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    println!(
+        "FIGs: {} {} {} (skipped {}, malformed {})",
+        list("0", &c.fig0),
+        list("1", &c.fig1),
+        list("2", &c.fig2),
+        c.skipped,
+        c.malformed
+    );
     println!();
     println!(
         "{:<18} {:<9} {:<6} {:>5} {:>5} {:>4} {:>8}  {:<17} apps",

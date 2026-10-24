@@ -28,11 +28,22 @@ lost.
 (halfband) 2.3, OFDM 3.3, FIC 0.3, sub-channel 0.3–1.2 (32–160 kbit/s),
 audio 0.2–0.4. Whole file run ~7.5 % including reading the file.
 
+**PAD.** `decdab-data` (DecDRM's data crate: MOT, slideshow, SPI,
+Journaline, data groups) gained `pad`: F-PAD/X-PAD with contents
+indicators, DLS with DL Plus, MOT data groups via X-PAD. DLS decodes on
+every service tried, DAB+ and MP2 (Absolute, Classic FM, Heart, Capital,
+Smooth, LBC, BBC Radio 1/2/4), with no bad CRC. In a DAB MP2 frame the
+ScF-CRC sits between X-PAD and F-PAD; it is 4 bytes with the 27/30-band
+allocation tables (LBC's 24 kHz too) and 2 with the 8/12-band ones.
+No London service in these captures signals a slideshow (FIG 0/13 is sent
+only by 12B and 12C, for data services), so MOT via PAD waits for the
+modulator.
+
 ### Gaps
 
-- FIG 0/13 user applications are not yet attached to audio services on D1
-  (look at the order 0/2 and 0/13 arrive in).
+- FIG 0/13 is attached only when 0/2 came first (fine in practice; the
+  commercial ensembles send no 0/13 at all).
 - Ensemble label shows the EId until FIG 1/0 arrives (the CLI picks the
   service after 10 frames).
-- No PAD, DLS, slideshow, data services, modulator, GUI yet.
+- No packet-mode data services (SPI/EPG, Journaline, TPEG), modulator or GUI yet.
 - MP2's ScF-CRC is not checked; a damaged frame plays as it is.

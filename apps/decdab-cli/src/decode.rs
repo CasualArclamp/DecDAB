@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use decdab_codecs::{AacDecoder, Mp2Decoder, Pcm};
+use decdab_data::pad::{PadDecoder, PadEvent, dl_plus_name};
 use decdab_fic::{Ensemble, FicDecoder, Service};
-use decdab_msc::{SubChannelDecoder, SuperframeDecoder};
+use decdab_msc::{SubChannelDecoder, SuperframeDecoder, au_pad};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
 use decdab_ofdm::{Demod, Frontend};
 
@@ -29,6 +30,9 @@ pub struct DecodeArgs {
     /// WAV file to write.
     #[arg(short, long)]
     pub out: Option<PathBuf>,
+    /// Folder for the slideshow's images (and other MOT objects).
+    #[arg(long)]
+    pub slides: Option<PathBuf>,
     #[command(flatten)]
     pub gains: Gains,
 }
@@ -126,6 +130,11 @@ pub fn run(a: DecodeArgs) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     let t0 = Instant::now();
     let mut give_up = false;
+    let mut pad = PadDecoder::new();
+    let mut pad_events: Vec<PadEvent> = Vec::new();
+    if let Some(dir) = &a.slides {
+        std::fs::create_dir_all(dir)?;
+    }
     while (read as f64) < a.seconds * rate && !give_up {
         let n = src.read(&mut buf)?;
         if n == 0 {
@@ -202,6 +211,11 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                                     Err(e) => errors.push(e.to_string()),
                                 }
                             }
+                            if au.ok
+                                && let Some(field) = au_pad(au.data)
+                            {
+                                pad.push(field, &mut pad_events);
+                            }
                             if let Some(dec) = aac {
                                 match dec.decode(au.ok.then_some(au.data)) {
                                     Ok(pcm) => pcms.push(pcm),
@@ -214,6 +228,9 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                         let mut found: Vec<Vec<u8>> = Vec::new();
                         m.push(&lf, |fr| found.push(fr.to_vec()));
                         for fr in found {
+                            if let Some(field) = decdab_codecs::mp2::pad_field(&fr) {
+                                pad.push(&field, &mut pad_events);
+                            }
                             match m.decode(&fr) {
                                 Ok(p) => pcms.push(p),
                                 Err(e) => errors.push(e.to_string()),
@@ -222,6 +239,52 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                     }
                 }
                 t_audio += t.elapsed().as_secs_f64();
+                for ev in pad_events.drain(..) {
+                    let at = read as f64 / rate;
+                    match ev {
+                        PadEvent::Dls(l) => {
+                            let tags: Vec<String> = l
+                                .tags
+                                .iter()
+                                .map(|(k, v)| format!("{}: {v}", dl_plus_name(*k)))
+                                .collect();
+                            println!(
+                                "[{at:6.1} s] DLS  {}{}",
+                                l.text,
+                                if tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("   ({})", tags.join("; "))
+                                }
+                            );
+                        }
+                        PadEvent::DlsClear => println!("[{at:6.1} s] DLS cleared"),
+                        PadEvent::Mot {
+                            transport_id,
+                            name,
+                            mime,
+                            data,
+                            ..
+                        } => {
+                            println!(
+                                "[{at:6.1} s] MOT  {name:?} ({mime}, {} bytes, transport {transport_id})",
+                                data.len()
+                            );
+                            if let Some(dir) = &a.slides {
+                                let safe: String = name
+                                    .chars()
+                                    .map(|c| if c.is_alphanumeric() || ".-_".contains(c) { c } else { '_' })
+                                    .collect();
+                                let file = if safe.is_empty() {
+                                    format!("mot_{transport_id}")
+                                } else {
+                                    safe
+                                };
+                                std::fs::write(dir.join(file), &data)?;
+                            }
+                        }
+                    }
+                }
                 for p in pcms {
                     concealed += p.concealed as u64;
                     pcm_secs += p.samples.len() as f64 / p.channels as f64 / p.rate as f64;
@@ -277,6 +340,11 @@ pub fn run(a: DecodeArgs) -> Result<()> {
         pc(t_msc),
         pc(t_audio),
         pc(wall)
+    );
+    let ps = pad.stats;
+    println!(
+        "PAD: {} fields, DLS segments {} ({} bad CRC), MOT data groups {} ({} bad)",
+        ps.pads, ps.dls_segments, ps.dls_crc_errors, ps.mot_groups, ps.mot_errors
     );
     if !errors.is_empty() {
         errors.dedup();

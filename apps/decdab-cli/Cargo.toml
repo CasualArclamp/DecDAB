@@ -27,3 +27,4 @@ decdab-ofdm = { path = "../../crates/decdab-ofdm" }
 decdab-fic = { path = "../../crates/decdab-fic" }
 decdab-msc = { path = "../../crates/decdab-msc" }
 decdab-codecs = { path = "../../crates/decdab-codecs" }
+decdab-data = { path = "../../crates/decdab-data" }

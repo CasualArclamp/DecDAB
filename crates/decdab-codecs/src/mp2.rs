@@ -157,6 +157,15 @@ impl Header {
         if self.mode == 3 { 1 } else { 2 }
     }
 
+    /// Bytes of DAB's scale-factor CRC (EN 300 401 §7.3.2.2): one CRC-8
+    /// for each group of sub-bands that can carry bits, so 4 with the
+    /// 27- and 30-band tables (MPEG-2 LSF too) and 2 with the 8- and
+    /// 12-band ones. Checked on the air: LBC (24 kHz, 64 kbit/s mono) and
+    /// the BBC's 48 kHz services send 4.
+    pub fn scf_crc_len(&self) -> usize {
+        if matches!(self.table(), 2 | 3) { 2 } else { 4 }
+    }
+
     /// Which allocation table (ISO/IEC 11172-3 §2.4.3.3.1).
     fn table(&self) -> usize {
         if !self.mpeg1 {
@@ -243,6 +252,21 @@ impl Synth {
             *o = acc;
         }
     }
+}
+
+/// The PAD field of a DAB MP2 frame as the PAD decoder wants it: the bytes
+/// before the ScF-CRC (the X-PAD at their end), then the F-PAD. The
+/// frame ends X-PAD, ScF-CRC, F-PAD (EN 300 401 Figure 6).
+pub fn pad_field(frame: &[u8]) -> Option<Vec<u8>> {
+    let h = Header::parse(frame)?;
+    let n = frame.len();
+    let crc = h.scf_crc_len();
+    if n < 2 + crc + 8 {
+        return None;
+    }
+    let mut f = frame[..n - 2 - crc].to_vec();
+    f.extend_from_slice(&frame[n - 2..]);
+    Some(f)
 }
 
 pub struct Mp2Decoder {
