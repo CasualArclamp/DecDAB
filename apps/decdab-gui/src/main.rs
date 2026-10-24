@@ -14,6 +14,7 @@
 mod band;
 mod card;
 mod freq_display;
+mod mux_map;
 mod prefs;
 mod remember;
 mod scopes;
@@ -937,8 +938,6 @@ impl App {
                     format!("{y:04}-{m:02}-{dd:02} {:02}:{:02}", t.hours, t.minutes),
                 ));
             }
-            let used: u32 = e.subchannels.values().map(|s| s.size as u32).sum();
-            details.push(kv("capacity", format!("{used} of 864 CU")));
         }
         card::Card {
             standard: locked.then_some(card::Standard::Dab),
@@ -1265,6 +1264,12 @@ impl App {
         card::show(ui, &self.card());
         let ens = Arc::clone(&self.ensemble);
         let mut action = None;
+        if self.decode && self.dab.locked {
+            ui.add_space(6.0);
+            if let Some(sid) = mux_map::bar(ui, &ens, self.dab.playing.or(self.want_play)) {
+                action = Some(services::Action::Play(sid));
+            }
+        }
         if let Some(sid) = self.dab.playing.or(self.want_play)
             && let Some(svc) = ens.services.get(&sid)
         {
