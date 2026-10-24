@@ -39,11 +39,32 @@ No London service in these captures signals a slideshow (FIG 0/13 is sent
 only by 12B and 12C, for data services), so MOT via PAD waits for the
 modulator.
 
+**Engine and GUI** (DecDVB-T's layout): dial and controls, the Band III
+band view and waterfall with the block raster, the DAB card (ensemble label,
+MER bar with the margin against the code's required MER and its tick, ECC
+with the code rate beside it, EId, services, FIBs, carrier offset, time,
+capacity), the playing service (DLS, DL Plus tags, slideshow, codec and
+frame counts, volume), the service list, the scopes (FIC and MSC DQPSK
+points, gain and SNR per carrier, impulse response with echoes) and the
+statistics bar. Live on 11D from the HackRF: locked, Absolute Radio
+playing, whole app about 20 % of a core at 15 fps (OFDM 7 %, audio 1 %).
+
+**Required MER** (`--example threshold`, noise added to captures): EEP 3-A
+is error free from 10.5 dB of the receiver's MER (first lost AUs at
+10.1–10.3 dB on 11A and 11D); the FIC loses its first FIBs at 9.8–9.9 dB.
+11D sits at 11.6 dB: a margin of about 1 dB on this aerial. Other rates are
+estimated (card.rs).
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the
   commercial ensembles send no 0/13 at all).
 - Ensemble label shows the EId until FIG 1/0 arrives (the CLI picks the
   service after 10 frames).
-- No packet-mode data services (SPI/EPG, Journaline, TPEG), modulator or GUI yet.
+- No packet-mode data services (SPI/EPG, Journaline, TPEG) or modulator
+  yet; the slideshow has not been seen on air (no London service in the
+  captures signals one).
+- The GUI has no band scan window, history or channel panels, and uses
+  DecDVB-T's icon.
+- GitHub: `gh` is installed but not signed in.
 - MP2's ScF-CRC is not checked; a damaged frame plays as it is.
