@@ -16,6 +16,7 @@ mod card;
 mod freq_display;
 mod mux_map;
 mod prefs;
+mod recorder;
 mod remember;
 mod scopes;
 mod sdr;
@@ -57,6 +58,11 @@ struct Options {
     block: Option<Block>,
     rate_msps: Option<f64>,
     screenshot: Option<PathBuf>,
+    /// Record the app's own frames to a video: the file, when to start and
+    /// for how long (seconds).
+    record_video: Option<PathBuf>,
+    record_from: f64,
+    record_secs: f64,
     after: f64,
     fps: f64,
     bottom: Bottom,
@@ -98,12 +104,21 @@ impl Bottom {
 }
 
 impl Options {
+    /// A screenshot or a recording: the same every time, so nothing kept
+    /// from or for other runs, and no sound.
+    fn test_run(&self) -> bool {
+        self.screenshot.is_some() || self.record_video.is_some()
+    }
+
     fn from_args() -> Result<Options, String> {
         let mut o = Options {
             file: None,
             block: None,
             rate_msps: None,
             screenshot: None,
+            record_video: None,
+            record_from: 5.0,
+            record_secs: 12.0,
             after: 6.0,
             fps: 15.0,
             bottom: Bottom::Scopes,
@@ -128,6 +143,13 @@ impl Options {
                     o.rate_msps = Some(value("MS/s")?.parse().map_err(|_| "bad --rate")?);
                 }
                 "--screenshot" => o.screenshot = Some(value("a .png path")?.into()),
+                "--record-video" => o.record_video = Some(value("an .mp4 path")?.into()),
+                "--record-from" => {
+                    o.record_from = value("seconds")?.parse().map_err(|_| "bad --record-from")?
+                }
+                "--record-secs" => {
+                    o.record_secs = value("seconds")?.parse().map_err(|_| "bad --record-secs")?
+                }
                 "--bottom" => {
                     let v = value("scopes or none")?;
                     o.bottom =
@@ -151,7 +173,7 @@ impl Options {
             }
         }
         let kept = remember::Saved::load();
-        if o.screenshot.is_none() {
+        if !o.test_run() {
             if !o.bottom_given
                 && let Some(b) = kept.bottom.as_deref().and_then(Bottom::parse)
             {
@@ -227,7 +249,7 @@ fn main() -> eframe::Result {
             eprintln!("decdab-gui: {e}");
             eprintln!(
                 "usage: decdab-gui [capture.cs8] [--block 12B] [--rate MSPS] [--play SERVICE] \
-                 [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|none] \
+                 [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
                  [--window sdr] [--mute] [--no-decode]"
             );
             std::process::exit(2);
@@ -236,7 +258,7 @@ fn main() -> eframe::Result {
     let (w, h) = opts
         .kept
         .window
-        .filter(|_| opts.screenshot.is_none())
+        .filter(|_| !opts.test_run())
         .unwrap_or((1400, 860));
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([w as f32, h as f32])
@@ -333,6 +355,7 @@ struct App {
     smooth_mode: bool,
     smooth_sent: bool,
     keeper: Option<remember::Keeper>,
+    recorder: Option<recorder::Recorder>,
     radio: (Block, f64),
     window_size: (u32, u32),
 }
@@ -414,6 +437,7 @@ impl App {
             smooth_mode: opts.fps >= SMOOTH_FPS,
             smooth_sent: false,
             keeper: None,
+            recorder: None,
             radio: (block, tune_hz),
             window_size: kept.window.unwrap_or((1400, 860)),
             opts,
@@ -423,7 +447,15 @@ impl App {
         } else if app.opts.block.is_some() {
             app.start();
         }
-        if app.opts.screenshot.is_none() {
+        if let Some(p) = app.opts.record_video.clone() {
+            app.recorder = Some(recorder::Recorder::new(
+                p,
+                app.opts.record_from,
+                app.opts.record_secs,
+                app.opts.fps,
+            ));
+        }
+        if !app.opts.test_run() {
             app.keeper = Some(remember::Keeper::new());
         }
         app
@@ -1355,7 +1387,12 @@ impl eframe::App for App {
         self.remember(ctx);
         self.cpu_percent = self.cpu.poll();
         self.handle_screenshot(ctx);
-        if self.session.is_some() || self.opts.screenshot.is_some() {
+        if let Some(r) = &mut self.recorder
+            && r.tick(ctx, self.started)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.session.is_some() || self.opts.test_run() {
             ctx.request_repaint_after(self.pace());
         }
         self.frame_cost[0] += t0.elapsed();

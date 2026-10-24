@@ -20,6 +20,7 @@ cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_am
 cargo run --release -p decdab-gui                                     # the GUI
 cargo run --release -p decdab-gui -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --play "Classic FM" --screenshot out/x.png --after 10
 cargo run --release -p decdab-gui -- --block 11D --play Absolute       # live (needs the HackRF free)
+cargo run --release -p decdab-gui -- CAPTURE --play SERVICE --fps 30 --record-video out/x.mp4 --record-from 5 --record-secs 12   # the GUI records its own frames (ffmpeg on PATH); scripts/promo makes the promo from such clips
 cargo run --release -p decdab-engine --example threshold -- captures/11a_long_216.928MHz_4.096Msps_amp.cs8 "absolute 80" 12 -12 -10 -8 -6   # MER where decoding breaks
 cargo run --release -p decdab-ofdm --example fic_probe -- captures/12a_223.936MHz_4.096Msps_amp.cs8   # per-frame lock figures and FIB CRCs
 ```
