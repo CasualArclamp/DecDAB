@@ -40,7 +40,7 @@ core for a whole receiver with audio:
 | Standards | ETSI EN 300 401 (DAB), TS 102 563 (DAB+), EN 301 234 (MOT), TS 101 499 (slideshow), TS 102 818 / 102 371 (SPI), TS 102 979 (Journaline), TS 101 756 (tables), ISO/IEC 11172-3 and 13818-3 (Layer II). Mode I only (Band III). |
 | Region | **UK Band III** (5A–13F). The roof aerial is UHF-filtered, so Band III is weak: `--amp --lna 40 --vga 20`. |
 | Front end | **HackRF One** (live), IQ files. |
-| Repo | Local git; GitHub **CasualArclamp/DecDAB, private** (needs `gh`). |
+| Repo | Local git; GitHub **CasualArclamp/DecDAB, public** (since 2026-10-24). |
 | Licence | GPL-3.0-or-later, `made by CasualArclamp` headers. FDK-AAC is under its own Fraunhofer licence (vendored, as in DecDRM). |
 
 ## 2. Crates

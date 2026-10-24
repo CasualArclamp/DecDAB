@@ -2,9 +2,8 @@
 # Build and test on every push to main and every pull request, and on demand (Actions →
 # CI → Run workflow, or `gh workflow run ci.yml`). After DecDRM's CI.
 #
-# The repository is private, so these runs use the account's Actions minutes (Windows
-# minutes count double): one Linux and one Windows job, cached, and docs-only pushes skip
-# CI.
+# The repository is public, so GitHub's runners cost nothing; docs-only pushes still
+# skip CI.
 #
 # - test (Linux, Windows): the workspace's tests; clippy with warnings as errors (as in
 #   CLAUDE.md); scripts/smoke-test.sh (the CLI runs, the GUI draws headless).
