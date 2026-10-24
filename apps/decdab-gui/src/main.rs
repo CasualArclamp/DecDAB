@@ -1264,12 +1264,6 @@ impl App {
         card::show(ui, &self.card());
         let ens = Arc::clone(&self.ensemble);
         let mut action = None;
-        if self.decode && self.dab.locked {
-            ui.add_space(6.0);
-            if let Some(sid) = mux_map::bar(ui, &ens, self.dab.playing.or(self.want_play)) {
-                action = Some(services::Action::Play(sid));
-            }
-        }
         if let Some(sid) = self.dab.playing.or(self.want_play)
             && let Some(svc) = ens.services.get(&sid)
         {
@@ -1403,6 +1397,11 @@ impl eframe::App for App {
             });
 
         let mut tune = None;
+        let mux = if self.decode && self.dab.locked {
+            mux_map::segments(&self.ensemble, self.dab.playing.or(self.want_play))
+        } else {
+            Vec::new()
+        };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1414,9 +1413,15 @@ impl eframe::App for App {
                     levels: self.history.levels(),
                     waterfall: tex,
                     vfo_hz: self.vfo_hz,
+                    mux: &mux,
                 };
-                if let Some(band::Action::Tune(b)) = band::show(ui, &inp) {
-                    tune = Some(b);
+                match band::show(ui, &inp) {
+                    Some(band::Action::Tune(b)) => tune = Some(b),
+                    Some(band::Action::Play(sid)) => {
+                        self.want_play = Some(sid);
+                        self.selected = Some(sid);
+                    }
+                    None => {}
                 }
             });
         let ctx = ui.ctx().clone();

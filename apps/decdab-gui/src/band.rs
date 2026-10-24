@@ -4,9 +4,11 @@
 //! received) bracketed. From DecDVB-T's band view (after DecSAT's).
 
 use decdab_core::channel::{BAND_III, Block, block_at};
+
+use crate::mux_map::{CIF_CUS, Segment, UNUSED};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Mesh, Pos2, Rect, Sense, Shape,
-    Stroke, TextureId, pos2,
+    Stroke, TextureId, pos2, vec2,
 };
 
 /// Half of a DAB ensemble's occupied bandwidth (1536 carriers, 1 kHz apart).
@@ -30,11 +32,15 @@ pub struct BandInput<'a> {
     pub waterfall: Option<(TextureId, Rect)>,
     /// The ensemble being received, if one is picked.
     pub vfo_hz: Option<f64>,
+    /// Its multiplex, drawn across its bracket at the top of the waterfall.
+    pub mux: &'a [Segment],
 }
 
 pub enum Action {
     /// A click on a block in the view.
     Tune(Block),
+    /// A click on a sub-channel of the multiplex strip: play its service.
+    Play(u32),
 }
 
 pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Option<Action> {
@@ -224,8 +230,57 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Option<Action> {
         }
     }
 
+    // The multiplex: the CIF's capacity units across the ensemble's bracket,
+    // the playing service's lit. They are slots in time (a sub-channel sits
+    // in one or a few OFDM symbols, spread over every carrier), drawn here
+    // only to sit with the ensemble they belong to.
+    let mut strip_hit: Option<&Segment> = None;
+    let mut strip: Option<Rect> = None;
+    if let (Some(v), false) = (inp.vfo_hz, inp.mux.is_empty()) {
+        let (x0, x1) = (x_of(v - OCCUPIED_HALF_HZ), x_of(v + OCCUPIED_HALF_HZ));
+        if x0 >= plot_l && x1 <= plot_r && x1 - x0 > 80.0 {
+            let r = Rect::from_min_max(pos2(x0, wf.top() + 4.0), pos2(x1, wf.top() + 20.0));
+            painter.rect_filled(r.expand(1.0), CornerRadius::same(2), Color32::from_black_alpha(200));
+            painter.rect_filled(r, CornerRadius::ZERO, UNUSED);
+            let cx = |cu: f32| r.left() + cu / CIF_CUS as f32 * r.width();
+            let pointer = resp.hover_pos();
+            for s in inp.mux {
+                let seg = Rect::from_min_max(
+                    pos2(cx(s.start as f32), r.top()),
+                    pos2(cx((s.start + s.size) as f32), r.bottom()),
+                );
+                painter.rect_filled(seg.shrink2(vec2(0.5, 0.0)), CornerRadius::ZERO, s.colour);
+                if pointer.is_some_and(|pt| seg.contains(pt)) {
+                    strip_hit = Some(s);
+                }
+            }
+            let used: u32 = inp.mux.iter().map(|s| s.size as u32).sum();
+            let playing = inp.mux.iter().find(|s| s.playing);
+            let text = match playing {
+                Some(s) => format!(
+                    "CU {}–{} of 864 · {used} used · capacity units (time slots, not frequencies)",
+                    s.start,
+                    s.start + s.size - 1
+                ),
+                None => format!("multiplex · {used} of 864 CU · capacity units (time slots, not frequencies)"),
+            };
+            caption(&painter, pos2(r.left(), r.bottom() + 3.0), text, 10.0);
+            strip = Some(r);
+        }
+    }
+
     // Pointer: a crosshair line and a readout of what is under it.
     let mut action = None;
+    if let (Some(s), Some(r)) = (strip_hit, strip) {
+        caption(&painter, pos2(r.left(), r.bottom() + 18.0), s.label.clone(), 11.0);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        if resp.clicked()
+            && let Some(sid) = s.sid
+        {
+            return Some(Action::Play(sid));
+        }
+        return None;
+    }
     if let Some(p) = resp.hover_pos()
         && (plot_l..=plot_r).contains(&p.x)
         && (spec.top()..=wf.bottom()).contains(&p.y)
@@ -263,4 +318,12 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Option<Action> {
         }
     }
     action
+}
+
+/// Text over the waterfall, on a dark backing so it reads over a bright one.
+fn caption(painter: &egui::Painter, at: Pos2, text: String, size: f32) {
+    let galley = painter.layout_no_wrap(text, FontId::monospace(size), Color32::from_gray(230));
+    let r = Rect::from_min_size(at, galley.size()).expand(2.0);
+    painter.rect_filled(r, CornerRadius::same(2), Color32::from_black_alpha(190));
+    painter.galley(at, galley, Color32::WHITE);
 }
