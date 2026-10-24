@@ -29,6 +29,16 @@ Captures live in `captures/`, named by their tuning
 from the name. They are not committed. Band III is weak on this aerial:
 record with `--amp --lna 40 --vga 20` (VGA 30 clips 12B).
 
+**GitHub** (private: CasualArclamp/DecDAB; `gh` is at `C:\Program Files\GitHub CLI\gh.exe`).
+`ci.yml` runs on every push to main and every PR: Linux and Windows build, tests,
+clippy, `scripts/smoke-test.sh`. The repo is private, so runs use the account's Actions
+minutes: run locally only what a change needs and let CI do the rest. Releases: push a
+tag `vX.Y.Z` (the workspace version must match); `release.yml` builds the portable
+Windows exes, checks and smoke-tests them and drafts the release; then
+`gh release edit vX.Y.Z --title … --notes-file … --draft=false --latest`. Locally,
+`powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` writes the same
+exes to `exe\` (git-ignored).
+
 Rust is installed through rustup (stable MSVC). In Git Bash, `~/.cargo/bin`
 may need adding to PATH. FDK-AAC builds from `third_party/fdk-aac` (a
 submodule; `git submodule update --init`), which takes a minute the first
