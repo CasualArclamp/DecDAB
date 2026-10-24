@@ -24,6 +24,7 @@ decdab-io = { path = "../../crates/decdab-io" }
 decdab-engine = { path = "../../crates/decdab-engine" }
 decdab-ofdm = { path = "../../crates/decdab-ofdm" }
 decdab-fic = { path = "../../crates/decdab-fic" }
+decdab-fec = { path = "../../crates/decdab-fec" }
 decdab-data = { path = "../../crates/decdab-data" }
 decdab-audio = { path = "../../crates/decdab-audio" }
 anyhow.workspace = true

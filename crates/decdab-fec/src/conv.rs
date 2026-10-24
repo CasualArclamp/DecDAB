@@ -211,6 +211,14 @@ impl Plan {
             + self.pad
     }
 
+    /// The code rate, information bits over bits sent, in lowest terms
+    /// (EEP 3-A is 1/2, the FIC 1/3).
+    pub fn code_rate(&self) -> (usize, usize) {
+        let (k, n) = (self.info_bits(), self.coded_bits());
+        let g = gcd(k, n).max(1);
+        (k / g, n / g)
+    }
+
     /// The kept/erased pattern over the mother bits, in order.
     fn mask(&self) -> impl Iterator<Item = bool> + '_ {
         let runs = self.runs.iter().flat_map(|&(l, p)| {
@@ -242,6 +250,10 @@ impl Plan {
         );
         out.extend(std::iter::repeat_n(0, self.pad));
     }
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 /// Encode `bits` with the mother code, six zero tail bits appended: four
@@ -278,6 +290,9 @@ mod tests {
         let p = Plan::fic();
         assert_eq!(p.info_bits(), 768); // three FIBs
         assert_eq!(p.coded_bits(), 2304);
+        assert_eq!(p.code_rate(), (1, 3));
+        assert_eq!(Plan::eep(EepSet::A, 3, 48).unwrap().code_rate(), (1, 2));
+        assert_eq!(Plan::eep(EepSet::B, 4, 15).unwrap().code_rate(), (4, 5));
     }
 
     #[test]

@@ -63,6 +63,38 @@ pub struct Card {
     pub active: bool,
 }
 
+/// The MER (as the receiver measures it: the DQPSK decisions' error over a
+/// frame) at which a code of rate `r` stops being error free.
+///
+/// Measured for the two rates on air in London by adding noise to captures
+/// (`decdab-engine --example threshold`, 11A and 11D): the FIC (1/3) loses
+/// its first FIBs at 9.8–9.9 dB, EEP 3-A (1/2) its first AUs at 10.1–10.3
+/// dB and is error free from 10.5. The other rates are placed from these
+/// with DVB-T's QPSK steps between rates (EN 300 744 Table A.1: 1/2 → 2/3
+/// +1.8 dB, → 3/4 +2.8, → 5/6 +3.8 in C/N) scaled by 0.75, the slope of
+/// this MER against C/N near the threshold: estimates, not measurements.
+pub fn required_mer_db(r: f32) -> f32 {
+    const PTS: [(f32, f32); 7] = [
+        (0.25, 9.7),
+        (1.0 / 3.0, 10.0),
+        (0.5, 10.5),
+        (2.0 / 3.0, 11.85),
+        (0.75, 12.6),
+        (0.8, 13.1),
+        (5.0 / 6.0, 13.35),
+    ];
+    if r <= PTS[0].0 {
+        return PTS[0].1;
+    }
+    for w in PTS.windows(2) {
+        let ((r0, m0), (r1, m1)) = (w[0], w[1]);
+        if r <= r1 {
+            return m0 + (m1 - m0) * (r - r0) / (r1 - r0);
+        }
+    }
+    PTS[PTS.len() - 1].1
+}
+
 /// A margin's colour: red below 0 dB, amber within 1 dB, else green.
 fn margin_colour(margin: Option<f32>) -> Color32 {
     match margin {
@@ -172,7 +204,11 @@ pub fn show(ui: &mut Ui, c: &Card) {
         .response;
     resp.on_hover_text(
         "The ensemble's label. The bar is the MER of the differential (DQPSK) \
-         decisions over a frame: the figure the Viterbi decoders see.",
+         decisions over a frame: the figure the Viterbi decoders see. The tick \
+         is the MER the code needs (the playing service's, else the FIC's), \
+         measured on London captures for rates 1/3 and 1/2; the margin is the \
+         MER less that. Below 0 dB audio frames are lost; within 1 dB a fade \
+         loses some.",
     );
 
     // ---- the C/N bar, ticked at what the mode needs

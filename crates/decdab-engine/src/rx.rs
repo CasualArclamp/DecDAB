@@ -133,6 +133,8 @@ pub struct DabStatus {
     pub fibs: u64,
     /// The service playing (its SId), with its figures, label and picture.
     pub playing: Option<u32>,
+    /// Its sub-channel (protection, size, bit rate).
+    pub subchannel: Option<decdab_fic::SubChannel>,
     pub service: Option<ServiceStats>,
     pub dls: Option<DynamicLabel>,
     pub slide: Option<Slide>,
@@ -581,6 +583,7 @@ fn run(
                 }
                 st.playing = r.service.as_ref().map(|(s, _)| *s);
                 st.service = r.service.as_ref().map(|(_, d)| d.stats.clone());
+                st.subchannel = r.service.as_ref().map(|(_, d)| *d.subchannel());
                 st.dls = r.dls.clone();
                 st.slide = r.slide.clone();
                 st.audio = r.player.as_ref().map(|p| p.handle());

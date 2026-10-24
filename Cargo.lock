@@ -678,6 +678,7 @@ dependencies = [
  "decdab-core",
  "decdab-data",
  "decdab-engine",
+ "decdab-fec",
  "decdab-fic",
  "decdab-io",
  "decdab-ofdm",

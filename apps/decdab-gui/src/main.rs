@@ -911,12 +911,21 @@ impl App {
         let locked = self.decode && d.locked && d.frames > 0;
         let mut details = Vec::new();
         let kv = |k: &str, v: String| (k.to_string(), v);
+        // The code the margin is for: the playing service's, else the FIC's.
+        let (rate, rate_name) = match d.subchannel.as_ref().and_then(|s| Some((s, s.plan()?))) {
+            Some((s, p)) => (p.code_rate(), s.protection_name()),
+            None => (decdab_fec::Plan::fic().code_rate(), "FIC".to_string()),
+        };
         if locked {
+            details.push(kv("ECC", e.ecc.map_or("–".into(), |v| format!("{v:02X}"))));
+            details.push(kv(
+                "code rate",
+                format!("{}/{} · {rate_name}", rate.0, rate.1),
+            ));
             details.push(kv(
                 "EId",
                 e.eid.map_or("–".into(), |v| format!("{v:04X}")),
             ));
-            details.push(kv("ECC", e.ecc.map_or("–".into(), |v| format!("{v:02X}"))));
             details.push(kv("services", e.services.len().to_string()));
             details.push(kv("sub-channels", e.subchannels.len().to_string()));
             details.push(kv("FIBs good", format!("{:.0} %", d.fib_ok_ratio * 100.0)));
@@ -935,7 +944,7 @@ impl App {
             standard: locked.then_some(card::Standard::Dab),
             assumed: false,
             name: locked.then(|| e.name()).filter(|n| !n.is_empty()),
-            qef_db: None,
+            qef_db: locked.then(|| card::required_mer_db(rate.0 as f32 / rate.1 as f32)),
             details,
             cn_db: locked.then_some(d.mer_db),
             cn_source: "MER",
