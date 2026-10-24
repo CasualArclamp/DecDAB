@@ -1,0 +1,29 @@
+# made by CasualArclamp
+[package]
+name = "decdab-cli"
+description = "DecDAB command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "decdab"
+path = "src/main.rs"
+
+[features]
+default = ["hackrf"]
+hackrf = ["decdab-io/hackrf"]
+
+[dependencies]
+decdab-core = { path = "../../crates/decdab-core" }
+decdab-io = { path = "../../crates/decdab-io" }
+anyhow.workspace = true
+rustfft.workspace = true
+num-complex.workspace = true
+clap = { version = "4.6", features = ["derive"] }
+decdab-ofdm = { path = "../../crates/decdab-ofdm" }
+decdab-fic = { path = "../../crates/decdab-fic" }
+decdab-msc = { path = "../../crates/decdab-msc" }
+decdab-codecs = { path = "../../crates/decdab-codecs" }
