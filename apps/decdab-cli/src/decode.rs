@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use decdab_codecs::{AacDecoder, Mp2Decoder, Pcm};
+use decdab_data::DataEvent;
 use decdab_data::pad::{PadDecoder, PadEvent, dl_plus_name};
+use decdab_engine::DataServiceDecoder;
 use decdab_fic::{Ensemble, FicDecoder, Service};
 use decdab_msc::{SubChannelDecoder, SuperframeDecoder, au_pad};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
@@ -131,6 +133,9 @@ pub fn run(a: DecodeArgs) -> Result<()> {
     }
     let mut fic = FicDecoder::new();
     let mut sub: Option<(SubChannelDecoder, Audio, String)> = None;
+    let mut data: Option<(DataServiceDecoder, String)> = None;
+    let mut data_events: Vec<DataEvent> = Vec::new();
+    let mut objects = 0usize;
     let mut wav: Option<Wav> = None;
     let out_path = a.out.clone();
     let (mut buf, mut dec) = (Vec::new(), Vec::new());
@@ -166,7 +171,7 @@ pub fn run(a: DecodeArgs) -> Result<()> {
             fic.push_frame(&soft[..FIC_BITS]);
             t_fic += t.elapsed().as_secs_f64();
             // Pick the service once the FIC has had a second to describe it.
-            if sub.is_none() && frames >= 10 {
+            if sub.is_none() && data.is_none() && frames >= 10 {
                 let Some(pat) = &a.service else {
                     give_up = true;
                     break;
@@ -182,6 +187,29 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                 let Some(sc) = e.subchannel_of(comp) else {
                     continue;
                 };
+                if !matches!(comp.transport, decdab_fic::Transport::Audio { .. }) {
+                    let Some(d) = DataServiceDecoder::new(comp, e) else {
+                        continue;
+                    };
+                    eprintln!(
+                        "{}: {} — sub-channel {}, {} kbit/s, {}, data ({:?}{})",
+                        e.name(),
+                        svc.name(),
+                        sc.id,
+                        sc.bitrate(),
+                        sc.protection_name(),
+                        d.application(),
+                        match comp.transport {
+                            decdab_fic::Transport::Packet { scid } => e
+                                .packet
+                                .get(&scid)
+                                .map_or(String::new(), |p| format!(", packet address {}", p.address)),
+                            _ => String::new(),
+                        }
+                    );
+                    data = Some((d, svc.name()));
+                    continue;
+                }
                 let d = SubChannelDecoder::new(*sc)
                     .with_context(|| format!("sub-channel {} has no valid protection", sc.id))?;
                 let audio = if comp.is_dab_plus() {
@@ -202,6 +230,18 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                     if comp.is_dab_plus() { "DAB+" } else { "MP2" }
                 );
                 sub = Some((d, audio, svc.name()));
+            }
+            if let Some((d, _)) = &mut data {
+                let t = Instant::now();
+                for c in 0..CIFS {
+                    d.push_cif(&soft[FIC_BITS + c * CIF_BITS..FIC_BITS + (c + 1) * CIF_BITS], &mut data_events);
+                }
+                t_msc += t.elapsed().as_secs_f64();
+                for ev in data_events.drain(..) {
+                    objects += 1;
+                    save_object(read as f64 / rate, ev, a.slides.as_deref())?;
+                }
+                continue;
             }
             let Some((d, audio, _)) = &mut sub else {
                 continue;
@@ -330,6 +370,36 @@ pub fn run(a: DecodeArgs) -> Result<()> {
         "{:.1} s of signal in {:.2} s: {:.1} s of audio ({} frames concealed); FIBs {}/{}",
         secs, wall, pcm_secs, concealed, fic.stats.fibs_ok, fic.stats.fibs
     );
+    if let Some((d, name)) = &data {
+        print!("{name}: {} logical frames", d.frames());
+        if let Some(p) = d.packet_stats() {
+            print!(
+                ", packets {} good / {} bad ({} padding, {} FEC, {} on our address), data groups {} ({} lost)",
+                p.packets_ok, p.packets_bad, p.padding, p.fec, p.packets_ours, p.groups, p.groups_dropped
+            );
+        }
+        let s = d.data_stats();
+        println!("; {objects} objects, {} data-group errors", s.data_group_errors);
+        if let Some(dir) = d.mot().and_then(|m| m.directory()) {
+            let total: u32 = dir.entries.iter().map(|e| e.header.body_size).sum();
+            println!(
+                "MOT directory: {} objects, {} kB (a carousel of about {:.0} s at this bitrate):",
+                dir.entries.len(),
+                total / 1000,
+                total as f64 * 8.0 / (d.subchannel().bitrate() as f64 * 1000.0)
+            );
+            for e in &dir.entries {
+                println!(
+                    "  {:5}  {:>7}  type {}/{}  {}",
+                    e.transport_id,
+                    e.header.body_size,
+                    e.header.content_type,
+                    e.header.content_subtype,
+                    e.header.content_name().unwrap_or_default()
+                );
+            }
+        }
+    }
     if let Some((d, audio, name)) = &sub {
         print!("{name}: {} logical frames", d.frames);
         match audio {
@@ -358,9 +428,60 @@ pub fn run(a: DecodeArgs) -> Result<()> {
         "PAD: {} fields, DLS segments {} ({} bad CRC), MOT data groups {} ({} bad)",
         ps.pads, ps.dls_segments, ps.dls_crc_errors, ps.mot_groups, ps.mot_errors
     );
+    let apps: Vec<String> = ps
+        .apps
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(a, n)| format!("{a}×{n}"))
+        .collect();
+    println!("X-PAD application types seen: {}", apps.join(" "));
     if !errors.is_empty() {
         errors.dedup();
         println!("{} decoder errors, first: {}", errors.len(), errors[0]);
+    }
+    Ok(())
+}
+
+/// Print one data event, and write it to `dir` if there is one.
+fn save_object(at: f64, ev: DataEvent, dir: Option<&Path>) -> Result<()> {
+    let safe = |name: &str, fallback: String| {
+        let s: String = name
+            .chars()
+            .map(|c| if c.is_alphanumeric() || ".-_".contains(c) { c } else { '_' })
+            .collect();
+        if s.is_empty() { fallback } else { s }
+    };
+    let (file, bytes) = match ev {
+        DataEvent::SlideShowImage { transport_id, name, mime, data, .. } => {
+            println!("[{at:6.1} s] slide {name:?} ({mime}, {} bytes)", data.len());
+            (safe(&name, format!("slide_{transport_id}")), data)
+        }
+        DataEvent::Epg { name, xml, .. } => {
+            println!("[{at:6.1} s] EPG   {name:?} ({} bytes of XML)", xml.len());
+            (format!("{}.xml", safe(&name, "epg".into())), xml.into_bytes())
+        }
+        DataEvent::MotObject { transport_id, header, body } => {
+            let name = header.content_name().unwrap_or_default();
+            println!(
+                "[{at:6.1} s] MOT   {name:?} (type {}/{}, {} bytes, transport {transport_id})",
+                header.content_type,
+                header.content_subtype,
+                body.len()
+            );
+            (safe(&name, format!("mot_{transport_id}")), body)
+        }
+        DataEvent::Journaline(u) => {
+            println!("[{at:6.1} s] Journaline {u:?}");
+            return Ok(());
+        }
+        other => {
+            println!("[{at:6.1} s] {other:?}");
+            return Ok(());
+        }
+    };
+    if let Some(dir) = dir {
+        std::fs::write(dir.join(file), bytes)?;
     }
     Ok(())
 }

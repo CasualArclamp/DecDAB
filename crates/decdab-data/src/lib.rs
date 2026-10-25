@@ -62,6 +62,7 @@ mod bits;
 pub mod charset;
 mod compress;
 pub mod crc;
+pub mod dab_packet;
 pub mod datagroup;
 mod decoder;
 pub mod encoder;

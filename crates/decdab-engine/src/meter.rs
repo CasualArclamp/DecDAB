@@ -93,7 +93,7 @@ impl CpuGauge {
 }
 
 /// How many stages there are.
-pub const STAGES: usize = 7;
+pub const STAGES: usize = 8;
 
 /// The stages of the receive thread, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +113,9 @@ pub enum Stage {
     /// The chosen service: its sub-channel's Viterbi decoder, the
     /// superframe or MP2 framing, the audio codec and the PAD.
     Audio,
+    /// The ensemble's SPI data services (logos, the guide), in the
+    /// background.
+    Data,
 }
 
 impl Stage {
@@ -124,6 +127,7 @@ impl Stage {
         Stage::Ofdm,
         Stage::Fic,
         Stage::Audio,
+        Stage::Data,
     ];
 
     pub fn name(self) -> &'static str {
@@ -135,6 +139,7 @@ impl Stage {
             Stage::Ofdm => "OFDM",
             Stage::Fic => "FIC",
             Stage::Audio => "audio",
+            Stage::Data => "data",
         }
     }
 }

@@ -67,16 +67,44 @@ a faint one near 130 µs, all static. Deciding every symbol on the diagonals
 had made frame-rate lines at ±10.4 Hz (`--example sound_probe` showed the
 13–17° jumps at each frame's start).
 
+**Packet mode, SPI: logos and the guide** (2026-10-25). No London audio
+service sends MOT in its X-PAD (only DLS: application types 0/2/3 on every
+service of six captures); the pictures travel in packet-mode data services
+instead (BBC Guide on 12B, Station Logos on 12C, both SPI). `dab_packet.rs`
+reads EN 300 401 §5.3.2 packets out of the logical frames (CRC per packet,
+24-byte grid, packets that straddle frames carried over) and builds data
+groups per address; packet-FEC parity packets (address 1022, nine per 2256
+bytes, no CRC) are skipped, which had looked like 16 % bad packets. The
+engine decodes the ensemble's SPI service in the background (0.2 % CPU) and
+keeps logos and schedules (`spi.rs`); the GUI shows logos in the service
+list, beside the playing service and in the slideshow's place, and a Guide
+panel. On 12B: 2301 packets, none bad, 97 data groups, 10 logos (BBC
+`siC22401.png`-style names, 32×32 to 320×240) in 60 s; the MOT directory
+lists 85 objects, 539 kB, a carousel of about 270 s, so the schedule files
+(`w20261025dC224c0.EHB`) have not been captured yet.
+
+**SFN: TII** (2026-10-25). `tii.rs`: the null symbol's carriers averaged
+(~2 s), each comb's eight groups against the noise, a transmitter where four
+groups stand clear (main id = rank among the 70 four-bit words, layout after
+welle.io). Delays from the phase slope across the comb's carriers are only
+known modulo N/48 (20.8 µs); each is placed on the averaged impulse
+response's strongest candidate path, the strongest transmitter on its peak.
+Here: 08/23 first, 11/01 and 11/02 33 µs later on 11A; 08/23 then
+11/06 at +33 µs on 12C; 11/01 at +17 µs and 08/23 on 12B. The GUI's SFN panel
+lists them (level, delay, extra km, path level) over the impulse response and
+the comb × group grid.
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the
   commercial ensembles send no 0/13 at all).
 - Ensemble label shows the EId until FIG 1/0 arrives (the CLI picks the
   service after 10 frames).
-- No packet-mode data services (SPI/EPG, Journaline, TPEG) or modulator
-  yet; the slideshow has not been seen on air (no London service in the
-  captures signals one).
-- The GUI has no band scan window, history or channel panels, and uses
-  DecDVB-T's icon.
-- GitHub: `gh` is installed but not signed in.
+- Packet mode carries SPI only so far (Journaline, TPEG not wired); the
+  schedules want a capture longer than the 270 s carousel; packet FEC
+  parity is skipped, not used. No modulator yet; the X-PAD slideshow has
+  not been seen on air.
+- TII names no transmitters (no database); a weak TII (the 130 µs path)
+  is not identified.
+- The GUI has no band scan window or history panel.
 - MP2's ScF-CRC is not checked; a damaged frame plays as it is.

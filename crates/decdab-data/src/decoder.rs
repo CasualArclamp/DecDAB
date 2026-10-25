@@ -50,6 +50,10 @@ pub enum DataEvent {
         name: String,
         /// TS 102 818 XML.
         xml: String,
+        /// The same as a tree.
+        root: epg::EpgElement,
+        /// The object's MOT header (scope start, end and id).
+        header: MotHeader,
     },
     /// Any other MOT object (EPG logos, non-image SlideShow objects, ...).
     MotObject {
@@ -338,10 +342,12 @@ impl DataDecoder {
                 DataEvent::WebsiteFile { path, mime, data }
             }
             UserApplication::Epg if obj.header.content_type == content_type::EPG => {
-                match obj.decompressed_body().and_then(|b| epg::decode_to_xml(&b)) {
-                    Ok(xml) => DataEvent::Epg {
+                match obj.decompressed_body().and_then(|b| epg::decode(&b)) {
+                    Ok(root) => DataEvent::Epg {
                         name: epg::object_name(&obj.header),
-                        xml,
+                        xml: root.to_xml(),
+                        root,
+                        header: obj.header,
                     },
                     Err(_) => DataEvent::MotObject {
                         transport_id: obj.transport_id,

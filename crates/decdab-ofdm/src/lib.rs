@@ -12,8 +12,10 @@ pub mod demod;
 pub mod frontend;
 pub mod params;
 pub mod tables;
+pub mod tii;
 
 pub use demod::{
-    Demod, Echo, Frame, FrameStats, SOUND_ROW_S, SOUND_ROWS, SOUND_SPACING_HZ, Scope,
+    Demod, Echo, Frame, FrameStats, SOUND_ROW_S, TII_EVERY, SOUND_ROWS, SOUND_SPACING_HZ, Scope,
 };
 pub use frontend::Frontend;
+pub use tii::{TiiReport, Transmitter};

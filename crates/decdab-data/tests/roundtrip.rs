@@ -325,7 +325,7 @@ fn epg_round_trip_through_mot_directory() {
     let epgs: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            DataEvent::Epg { name, xml } => Some((name.clone(), xml.clone())),
+            DataEvent::Epg { name, xml, .. } => Some((name.clone(), xml.clone())),
             _ => None,
         })
         .collect();

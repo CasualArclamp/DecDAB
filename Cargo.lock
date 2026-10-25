@@ -590,6 +590,7 @@ dependencies = [
  "decdab-codecs",
  "decdab-core",
  "decdab-data",
+ "decdab-engine",
  "decdab-fic",
  "decdab-io",
  "decdab-msc",

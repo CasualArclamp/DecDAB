@@ -312,7 +312,7 @@ fn scope(ui: &mut Ui, size: egui::Vec2, ph: &mut Phosphor, seen: bool, marks: &[
 }
 
 /// A plot area: the panel, the title and the axes' rectangle.
-fn frame(ui: &mut Ui, size: egui::Vec2, title: &str) -> (egui::Response, egui::Painter, Rect) {
+pub(crate) fn frame(ui: &mut Ui, size: egui::Vec2, title: &str) -> (egui::Response, egui::Painter, Rect) {
     let (resp, p) = ui.allocate_painter(size, Sense::hover());
     let rect = resp.rect;
     p.rect_filled(rect, CornerRadius::ZERO, PANEL_BG);
@@ -330,7 +330,7 @@ fn frame(ui: &mut Ui, size: egui::Vec2, title: &str) -> (egui::Response, egui::P
     (resp, p, plot)
 }
 
-fn border(p: &egui::Painter, plot: Rect) {
+pub(crate) fn border(p: &egui::Painter, plot: Rect) {
     p.rect_stroke(
         plot,
         CornerRadius::ZERO,
@@ -341,7 +341,7 @@ fn border(p: &egui::Painter, plot: Rect) {
 
 /// Ticks and labels on an axis from `lo` to `hi` every `step`, on the
 /// horizontal (`x`) or vertical axis of `plot`.
-fn ticks(
+pub(crate) fn ticks(
     p: &egui::Painter,
     plot: Rect,
     x: bool,
@@ -391,7 +391,7 @@ fn ticks(
 
 /// A "nice" tick step for a range: 1, 2 or 5 times a power of ten giving
 /// about five ticks.
-fn nice_step(range: f32) -> f32 {
+pub(crate) fn nice_step(range: f32) -> f32 {
     let raw = (range / 5.0).max(1e-6);
     let mag = 10f32.powf(raw.log10().floor());
     let r = raw / mag;
@@ -465,7 +465,7 @@ fn across_band(
 /// the lowest and the highest of each stretch, in the order they came, so a
 /// narrow notch is kept and the line costs the tessellator a few hundred
 /// points rather than a thousand.
-fn decimate(width: f32, pts: impl ExactSizeIterator<Item = egui::Pos2>) -> Vec<egui::Pos2> {
+pub(crate) fn decimate(width: f32, pts: impl ExactSizeIterator<Item = egui::Pos2>) -> Vec<egui::Pos2> {
     let pts: Vec<egui::Pos2> = pts.collect();
     let stride = (pts.len() as f32 / width.max(1.0)).floor().max(1.0) as usize;
     if stride < 2 {

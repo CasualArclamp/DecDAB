@@ -15,6 +15,8 @@ mod band;
 mod card;
 mod channel_view;
 mod freq_display;
+mod guide;
+mod logos;
 mod mux_map;
 mod prefs;
 mod recorder;
@@ -22,6 +24,7 @@ mod remember;
 mod scopes;
 mod sdr;
 mod services;
+mod sfn_view;
 mod source;
 mod waterfall;
 
@@ -84,6 +87,10 @@ enum Bottom {
     Scopes,
     /// The channel sounder: fading, delay–Doppler, Doppler by carrier.
     Channel,
+    /// The programme guide (SPI).
+    Guide,
+    /// The SFN's transmitters (TII) and their delays.
+    Sfn,
     Hidden,
 }
 
@@ -92,6 +99,8 @@ impl Bottom {
         match self {
             Bottom::Scopes => "scopes",
             Bottom::Channel => "channel",
+            Bottom::Guide => "guide",
+            Bottom::Sfn => "sfn",
             Bottom::Hidden => "none",
         }
     }
@@ -100,6 +109,8 @@ impl Bottom {
         Some(match s {
             "scopes" => Bottom::Scopes,
             "channel" => Bottom::Channel,
+            "guide" => Bottom::Guide,
+            "sfn" => Bottom::Sfn,
             "none" => Bottom::Hidden,
             _ => return None,
         })
@@ -156,7 +167,7 @@ impl Options {
                 "--bottom" => {
                     let v = value("scopes, channel or none")?;
                     o.bottom =
-                        Bottom::parse(&v).ok_or(format!("--bottom: not scopes, channel or none: {v}"))?;
+                        Bottom::parse(&v).ok_or(format!("--bottom: not scopes, channel, guide, sfn or none: {v}"))?;
                     o.bottom_given = true;
                 }
                 "--window" => o.window = Some(value("sdr")?),
@@ -302,6 +313,9 @@ struct App {
     /// The channel panel, and whether the engine was last told to sound.
     chan_view: channel_view::ChannelView,
     sounder_sent: bool,
+    /// The SFN panel, and whether the engine was last told to look for TII.
+    sfn_view: sfn_view::SfnView,
+    tii_sent: bool,
     started: Instant,
     shot_sent: bool,
     cpu_mark: Option<(f64, Instant)>,
@@ -348,6 +362,9 @@ struct App {
     want_play: Option<u32>,
     /// The slideshow's picture as a texture, with the slide it came from.
     slide_tex: Option<(u64, egui::TextureHandle)>,
+    /// Station logos and the guide, from the ensemble's SPI service.
+    logos: logos::Logos,
+    guide: guide::GuideView,
     volume: f32,
 
     tune_hz: f64,
@@ -429,6 +446,8 @@ impl App {
             scopes_sent: false,
             chan_view: channel_view::ChannelView::default(),
             sounder_sent: false,
+            sfn_view: sfn_view::SfnView::default(),
+            tii_sent: false,
             stats: Stats::default(),
             stats_at: Instant::now(),
             cpu: CpuGauge::default(),
@@ -442,6 +461,8 @@ impl App {
             play_sent: None,
             want_play: None,
             slide_tex: None,
+            logos: logos::Logos::default(),
+            guide: guide::GuideView::default(),
             volume,
             tune_hz,
             dial_hz: tune_hz,
@@ -569,6 +590,7 @@ impl App {
                 self.note.clear();
                 (self.scopes_sent, self.sdr_sent, self.fps_sent) = (false, None, None);
                 self.sounder_sent = false;
+                self.tii_sent = false;
                 self.rows_due.clear();
                 self.optimiser = None;
             }
@@ -615,6 +637,8 @@ impl App {
         self.play_sent = None;
         self.want_play = None;
         self.slide_tex = None;
+        self.logos.clear();
+        self.guide = guide::GuideView::default();
     }
 
     /// Ask the engine to decode the ensemble under the VFO while the decode
@@ -661,6 +685,19 @@ impl App {
             self.sounder_sent = want;
             if !want {
                 self.chan_view.reset();
+            }
+        }
+    }
+
+    /// TII is looked for only while the SFN panel shows.
+    fn sync_tii(&mut self) {
+        let Some(s) = &self.session else { return };
+        let want = self.bottom == Bottom::Sfn && self.decode;
+        if want != self.tii_sent {
+            s.rx.send(Command::Tii(want));
+            self.tii_sent = want;
+            if !want {
+                self.sfn_view.reset();
             }
         }
     }
@@ -923,8 +960,14 @@ impl App {
             if let Some(e) = u.ensemble {
                 self.ensemble = e;
             }
+            if let Some(spi) = u.spi {
+                self.logos.update(spi);
+            }
             if self.bottom == Bottom::Scopes {
                 self.scope.update(u.scope);
+            }
+            if self.bottom == Bottom::Sfn {
+                self.sfn_view.update(u.tii);
             }
             // A new slide: decode it into a texture.
             if let Some(sl) = &self.dab.slide
@@ -1249,6 +1292,8 @@ impl App {
             ui.label("panel");
             ui.selectable_value(&mut self.bottom, Bottom::Scopes, "scopes");
             ui.selectable_value(&mut self.bottom, Bottom::Channel, "channel");
+            ui.selectable_value(&mut self.bottom, Bottom::Guide, "guide");
+            ui.selectable_value(&mut self.bottom, Bottom::Sfn, "SFN");
             ui.selectable_value(&mut self.bottom, Bottom::Hidden, "none");
             if self.bottom == Bottom::Channel {
                 egui::ComboBox::from_id_salt("doppler")
@@ -1384,6 +1429,8 @@ impl App {
                 stats: self.dab.service.as_ref(),
                 dls: self.dab.dls.as_ref(),
                 slide: self.slide_tex.as_ref().map(|(_, t)| t),
+                logo: self.logos.get(ui.ctx(), sid, 128),
+                big_logo: self.logos.get(ui.ctx(), sid, 320),
                 slide_name: self.dab.slide.as_ref().map(|s| s.name.as_str()),
                 audio: self.dab.audio.as_ref(),
             };
@@ -1403,7 +1450,7 @@ impl App {
             }
         });
         ui.separator();
-        if let Some(a) = services::list(ui, &ens, &mut self.selected, self.dab.playing) {
+        if let Some(a) = services::list(ui, &ens, &mut self.selected, self.dab.playing, &mut self.logos) {
             action = Some(a);
         }
         match action {
@@ -1460,6 +1507,7 @@ impl eframe::App for App {
         self.sync_play();
         self.sync_scopes();
         self.sync_sounder();
+        self.sync_tii();
         self.sync_sdr();
         self.sync_fps();
         self.optimise_tick();
@@ -1519,6 +1567,25 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     ui.set_min_height(SCOPES_PANEL_H + 20.0);
                     self.chan_view.show(ui, status);
+                });
+        }
+        if self.bottom == Bottom::Sfn {
+            egui::Panel::bottom("sfn")
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.set_min_height(SCOPES_PANEL_H);
+                    self.sfn_view.show(ui, SCOPES_PANEL_H - 8.0);
+                });
+        }
+        if self.bottom == Bottom::Guide {
+            egui::Panel::bottom("guide")
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.set_min_height(SCOPES_PANEL_H);
+                    ui.set_max_height(SCOPES_PANEL_H);
+                    let ens = Arc::clone(&self.ensemble);
+                    self.guide
+                        .show(ui, &ens, self.dab.playing.or(self.want_play), &mut self.logos);
                 });
         }
         egui::Panel::right("services")

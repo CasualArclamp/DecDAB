@@ -10,6 +10,8 @@ use decdab_engine::ServiceStats;
 use decdab_fic::{Ensemble, Service, Transport, pty_name};
 use eframe::egui::{self, Color32, RichText, TextureHandle, Ui};
 
+use crate::logos::{Logos, fit};
+
 const PLAYING: Color32 = Color32::from_rgb(110, 220, 130);
 const DABPLUS: Color32 = Color32::from_rgb(110, 190, 255);
 const DAB: Color32 = Color32::from_rgb(240, 200, 90);
@@ -35,7 +37,9 @@ pub fn list(
     ens: &Ensemble,
     selected: &mut Option<u32>,
     playing: Option<u32>,
+    logos: &mut Logos,
 ) -> Option<Action> {
+    let ctx = ui.ctx().clone();
     let mut action = None;
     let mut services = ens.services_by_name();
     services.sort_by_key(|s| !matches!(s.primary().map(|c| c.transport), Some(Transport::Audio { .. })));
@@ -49,7 +53,7 @@ pub fn list(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             egui::Grid::new("service_rows")
-                .num_columns(4)
+                .num_columns(5)
                 .spacing([10.0, 3.0])
                 .striped(true)
                 .show(ui, |ui| {
@@ -62,6 +66,15 @@ pub fn list(
                             name = name.color(PLAYING).strong();
                         } else if !audio {
                             name = name.weak();
+                        }
+                        // Its logo (from SPI), small.
+                        match logos.get(&ctx, s.sid, 32) {
+                            Some(t) => {
+                                fit(ui, &t, 22.0, 16.0);
+                            }
+                            None => {
+                                ui.label("");
+                            }
                         }
                         let r = ui.selectable_label(*selected == Some(s.sid), name);
                         let sub = s.primary().and_then(|c| ens.subchannel_of(c));
@@ -109,12 +122,19 @@ pub struct NowPlaying<'a> {
     pub dls: Option<&'a DynamicLabel>,
     pub slide: Option<&'a TextureHandle>,
     pub slide_name: Option<&'a str>,
+    /// The station's logo (SPI), square-ish, and a bigger one shown in the
+    /// slideshow's place until a slide comes.
+    pub logo: Option<TextureHandle>,
+    pub big_logo: Option<TextureHandle>,
     pub audio: Option<&'a AudioHandle>,
 }
 
 pub fn now_playing(ui: &mut Ui, np: &NowPlaying, volume: &mut f32) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
+        if let Some(t) = &np.logo {
+            fit(ui, t, 36.0, 36.0);
+        }
         ui.label(
             RichText::new(np.service.name())
                 .size(18.0)
@@ -153,7 +173,7 @@ pub fn now_playing(ui: &mut Ui, np: &NowPlaying, volume: &mut f32) -> Option<Act
         }
     }
     // The slideshow.
-    if let Some(tex) = np.slide {
+    if let Some(tex) = np.slide.or(np.big_logo.as_ref()) {
         let w = (ui.available_width() - 8.0).min(320.0);
         let [tw, th] = tex.size();
         let h = w * th as f32 / tw.max(1) as f32;

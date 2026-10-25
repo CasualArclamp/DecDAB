@@ -32,6 +32,7 @@ use crate::params::{
     SYMBOLS_PER_CIF, bin,
 };
 use crate::tables::{carrier, prs_bins};
+use crate::tii::{Tii, TiiReport};
 
 type Iq = Complex32;
 
@@ -116,7 +117,13 @@ pub struct Frame<'a> {
     /// apart, k = −767, −765 … 767), [`SOUND_ROWS`] times a frame, while
     /// [`Demod::set_sounding`] is on; empty otherwise.
     pub sound: &'a [Vec<Iq>],
+    /// The transmitters heard (TII), every [`TII_EVERY`] frames while
+    /// [`Demod::set_tii`] is on.
+    pub tii: Option<&'a TiiReport>,
 }
+
+/// Frames between TII reports.
+pub const TII_EVERY: u64 = 10;
 
 /// Channel rows a frame for the sounder: one every 12 ms.
 pub const SOUND_ROWS: usize = 8;
@@ -173,6 +180,12 @@ pub struct Demod {
     /// Per carrier, the frame's DQPSK error and signal power.
     err: Vec<f32>,
     sig: Vec<f32>,
+    /// Transmitter identification: on or off, the null symbols' average,
+    /// the null symbol's carriers and the newest report.
+    tii_on: bool,
+    tii: Tii,
+    null: Vec<Iq>,
+    tii_report: Option<TiiReport>,
 }
 
 /// Index of carrier k among the active ones (−768 → 0, 768 → 1535).
@@ -244,7 +257,19 @@ impl Demod {
             scope: Scope::default(),
             err: vec![0.0; CARRIERS],
             sig: vec![0.0; CARRIERS],
+            tii_on: false,
+            tii: Tii::default(),
+            null: vec![Iq::default(); CARRIERS],
+            tii_report: None,
         }
+    }
+
+    /// Look for the transmitters' identification in the null symbols.
+    pub fn set_tii(&mut self, on: bool) {
+        if on != self.tii_on {
+            self.tii.reset();
+        }
+        self.tii_on = on;
     }
 
     /// Sound the channel: each frame's [`Frame::sound`] rows.
@@ -502,6 +527,13 @@ impl Demod {
 
     fn frame(&mut self, start: usize, misses: u32, on_frame: &mut impl FnMut(&Frame)) {
         let sym = |l: usize| start + NULL + l * SYMBOL + GUARD - ADVANCE;
+        // The null symbol, from the middle of the null (TII is a steady
+        // tone set through it; where the window sits only turns every
+        // transmitter's phases alike).
+        if self.tii_on {
+            self.spectrum(start + (NULL - FFT) / 2);
+            Self::carriers(&self.work, &mut self.null);
+        }
         // The phase reference, and from it the impulse response.
         self.spectrum(sym(0));
         Self::carriers(&self.work, &mut self.prev);
@@ -537,6 +569,17 @@ impl Demod {
             self.sig.fill(0.0);
         }
         let p = prs_bins();
+        if self.tii_on {
+            // The frame's common phase, from the phase reference, so the
+            // null symbols can be averaged coherently.
+            let c: Iq = self
+                .prev
+                .iter()
+                .enumerate()
+                .map(|(i, z)| z * p[bin(carrier_of(i))].conj())
+                .sum();
+            self.tii.push(&self.null, c / c.norm().max(1e-30));
+        }
         for (w, q) in self.work.iter_mut().zip(p.iter()) {
             *w *= q.conj();
         }
@@ -560,6 +603,7 @@ impl Demod {
         };
         let found = peak_ratio >= MIN_PEAK;
         let mut step = 0i32;
+        let mut first_path = 0i32;
         if found {
             // The first path within 12 dB of the strongest, searching back
             // from the strongest by up to the guard interval.
@@ -572,6 +616,7 @@ impl Demod {
                     break;
                 }
             }
+            first_path = first;
             // Wanted at ADVANCE; move by whole samples, at most a guard's
             // worth at a time.
             step = (first - ADVANCE as i32).clamp(-(GUARD as i32), GUARD as i32);
@@ -605,6 +650,13 @@ impl Demod {
                 peaks.truncate(6);
                 sc.echoes = peaks;
             }
+        }
+
+        if self.tii_on {
+            if found {
+                self.tii.push_cir(&pow, first_path);
+            }
+            self.tii_report = self.frames.is_multiple_of(TII_EVERY).then(|| self.tii.report(prs_bins()));
         }
 
         // The data symbols.
@@ -748,6 +800,7 @@ impl Demod {
                 stats,
                 scope: self.scopes_on.then_some(&self.scope),
                 sound: if self.sounding { &self.sound } else { &[] },
+                tii: self.tii_report.as_ref(),
             });
             // Steer half the residual: the samples already buffered keep the
             // old correction, which the per-symbol turn absorbs.

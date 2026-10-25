@@ -22,7 +22,7 @@ use decdab_data::pad::{DynamicLabel, PadEvent};
 use decdab_fic::{Ensemble, FicDecoder};
 use decdab_io::{IqFileWriter, IqSource};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
-use decdab_ofdm::{Demod, Frontend, SOUND_ROW_S, SOUND_SPACING_HZ, Scope};
+use decdab_ofdm::{Demod, Frontend, SOUND_ROW_S, SOUND_SPACING_HZ, Scope, TiiReport};
 
 /// The guard interval, µs (504 samples at 2.048 MHz).
 const GUARD_US: f64 = 246.09375;
@@ -30,7 +30,9 @@ const GUARD_US: f64 = 246.09375;
 use crate::delay_doppler::{ChannelHistory, DelayDoppler, FreqDoppler};
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
 use crate::meter::{Stage, StageLoad, StageMeter};
+use crate::data_service::DataServiceDecoder;
 use crate::service::{ServiceDecoder, ServiceStats};
+use crate::spi::SpiStore;
 use crate::waterfall::Waterfall;
 
 /// How the spectrum is built, and where the sound goes.
@@ -113,6 +115,8 @@ pub enum Command {
     /// scrolls a row a frame; the receiver's results are handed over as
     /// often (between 10 and 30 times a second).
     DisplayFps(f64),
+    /// Look for the transmitters' identification (TII) while on.
+    Tii(bool),
     FrontEnd(FrontEndSettings),
     /// Start recording to this file (cs8), or stop with `None`.
     Record(Option<PathBuf>),
@@ -166,6 +170,11 @@ pub struct DabUpdate {
     pub fading: Vec<Vec<f32>>,
     pub map: Option<Arc<DelayDoppler>>,
     pub freq_map: Option<Arc<FreqDoppler>>,
+    /// The logos and schedules, when something has arrived since the last
+    /// call.
+    pub spi: Option<Arc<SpiStore>>,
+    /// The transmitters heard, when a new report has come.
+    pub tii: Option<Arc<TiiReport>>,
 }
 
 #[derive(Default)]
@@ -176,6 +185,8 @@ struct DabOut {
     fading: Vec<Vec<f32>>,
     map: Option<Arc<DelayDoppler>>,
     freq_map: Option<Arc<FreqDoppler>>,
+    spi: Option<Arc<SpiStore>>,
+    tii: Option<Arc<TiiReport>>,
 }
 
 struct Shared {
@@ -249,6 +260,8 @@ impl Rx {
             fading: std::mem::take(&mut o.fading),
             map: o.map.take(),
             freq_map: o.freq_map.take(),
+            spi: o.spi.take(),
+            tii: o.tii.take(),
         }
     }
 
@@ -304,6 +317,12 @@ struct Receiver_ {
     dls: Option<DynamicLabel>,
     slide: Option<Slide>,
     slides: u64,
+    /// The SPI data services (found from FIG 0/13), decoded in the
+    /// background whatever plays; the SIds already set up.
+    spi_decoders: Vec<DataServiceDecoder>,
+    spi_tried: Vec<u32>,
+    spi: SpiStore,
+    spi_gen: u64,
 }
 
 impl Receiver_ {
@@ -321,6 +340,10 @@ impl Receiver_ {
             dls: None,
             slide: None,
             slides: 0,
+            spi_decoders: Vec::new(),
+            spi_tried: Vec::new(),
+            spi: SpiStore::default(),
+            spi_gen: 0,
         })
     }
 }
@@ -346,6 +369,8 @@ fn run(
     let mut rx: Option<Receiver_> = None;
     let mut want_service: Option<u32> = None;
     let mut scopes_on = false;
+    let mut tii_on = false;
+    let mut new_tii: Option<Arc<TiiReport>> = None;
     let mut settle = 0u64;
     let mut front = FrontEnd::new(FrontEndSettings::default());
     let mut publish_at = Instant::now();
@@ -362,12 +387,13 @@ fn run(
     let mut fading: Vec<Vec<f32>> = Vec::new();
     let mut maps_at = Instant::now();
     let set_error = |e: String| sh.stats.lock().unwrap().error = Some(e);
-    let new_rx = |vfo: f64, centre: f64, scopes: bool, sound: bool| match Receiver_::new(
+    let new_rx = |vfo: f64, centre: f64, scopes: bool, sound: bool, tii: bool| match Receiver_::new(
         vfo, centre, rate,
     ) {
         Ok(mut r) => {
             r.demod.set_scopes(scopes);
             r.demod.set_sounding(sound);
+            r.demod.set_tii(tii);
             Ok(r)
         }
         Err(e) => Err(e),
@@ -379,7 +405,7 @@ fn run(
                 Ok(Command::Decode(vfo)) => {
                     rx = None;
                     if let Some(v) = vfo {
-                        match new_rx(v, source.center_freq(), scopes_on, sounder.is_some()) {
+                        match new_rx(v, source.center_freq(), scopes_on, sounder.is_some(), tii_on) {
                             Ok(r) => rx = Some(r),
                             Err(e) => set_error(e),
                         }
@@ -394,6 +420,12 @@ fn run(
                         r.player = None;
                         r.dls = None;
                         r.slide = None;
+                    }
+                }
+                Ok(Command::Tii(on)) => {
+                    tii_on = on;
+                    if let Some(r) = &mut rx {
+                        r.demod.set_tii(on);
                     }
                 }
                 Ok(Command::Scopes(on)) => {
@@ -429,7 +461,7 @@ fn run(
                         sh.rows.lock().unwrap().clear();
                         wf.clear();
                         if rx.is_some() {
-                            rx = new_rx(hz, hz, scopes_on, sounder.is_some()).ok();
+                            rx = new_rx(hz, hz, scopes_on, sounder.is_some(), tii_on).ok();
                             if let Some(h) = &mut sounder {
                                 h.clear();
                             }
@@ -517,6 +549,9 @@ fn run(
                     if let Some(s) = f.scope {
                         new_scope = Some(Arc::new(s.clone()));
                     }
+                    if let Some(t) = f.tii {
+                        new_tii = Some(Arc::new(t.clone()));
+                    }
                     if let Some(h) = &mut sounder
                         && !f.sound.is_empty()
                     {
@@ -535,6 +570,34 @@ fn run(
             });
             for soft in frames.drain(..) {
                 meter.time(Stage::Fic, || r.fic.push_frame(&soft[..FIC_BITS]));
+                if r.fic.generation != r.fic_gen {
+                    find_spi(r);
+                }
+                if !r.spi_decoders.is_empty() {
+                    meter.time(Stage::Data, || {
+                        let mut ev = Vec::new();
+                        for d in &mut r.spi_decoders {
+                            for c in 0..CIFS {
+                                let a = FIC_BITS + c * CIF_BITS;
+                                d.push_cif(&soft[a..a + CIF_BITS], &mut ev);
+                            }
+                        }
+                        for e in ev {
+                            r.spi.push(e);
+                        }
+                        // The carousel's size, from the first decoder's
+                        // MOT directory.
+                        if let Some(d) = r.spi_decoders.first()
+                            && let Some(dir) = d.mot().and_then(|m| m.directory())
+                            && dir.entries.len() != r.spi.listed
+                        {
+                            let bytes: u64 = dir.entries.iter().map(|e| u64::from(e.header.body_size)).sum();
+                            r.spi.listed = dir.entries.len();
+                            r.spi.carousel_s = bytes as f32 * 8.0 / (d.subchannel().bitrate().max(8) as f32 * 1000.0);
+                            r.spi.generation += 1;
+                        }
+                    });
+                }
                 // The service asked for, once the FIC describes it.
                 if r.service.is_none()
                     && let Some(sid) = want_service
@@ -626,8 +689,15 @@ fn run(
                     r.fic_gen = r.fic.generation;
                     o.ensemble = Some(Arc::new(r.fic.ensemble.clone()));
                 }
+                if r.spi.generation != r.spi_gen {
+                    r.spi_gen = r.spi.generation;
+                    o.spi = Some(Arc::new(r.spi.clone()));
+                }
                 if let Some(s) = new_scope.take() {
                     o.scope = Some(s);
+                }
+                if let Some(t) = new_tii.take() {
+                    o.tii = Some(t);
                 }
                 if !fading.is_empty() {
                     o.fading.append(&mut fading);
@@ -680,6 +750,34 @@ fn run(
                 path: p.clone(),
                 bytes: *b,
             });
+        }
+    }
+}
+
+/// At most this many SPI services are decoded at once (an ensemble usually
+/// has one).
+const MAX_SPI: usize = 2;
+
+/// Set up a decoder for each SPI data service the FIC now describes
+/// (user application 7, TS 101 756 Table 16).
+fn find_spi(r: &mut Receiver_) {
+    let e = &r.fic.ensemble;
+    for svc in e.services.values() {
+        if r.spi_decoders.len() >= MAX_SPI || r.spi_tried.contains(&svc.sid) {
+            continue;
+        }
+        let Some(comp) = svc
+            .components
+            .iter()
+            .find(|c| c.apps.iter().any(|a| a.kind == 0x007))
+        else {
+            continue;
+        };
+        // `None` while the FIC has yet to say where it is: tried again
+        // with the next change.
+        if let Some(d) = DataServiceDecoder::new(comp, e) {
+            r.spi_tried.push(svc.sid);
+            r.spi_decoders.push(d);
         }
     }
 }

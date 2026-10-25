@@ -99,6 +99,9 @@ pub struct PadStats {
     pub dls_crc_errors: u64,
     pub mot_groups: u64,
     pub mot_errors: u64,
+    /// X-PAD subfields seen, by application type (§7.4.3 Table 11): what a
+    /// service sends, whether or not it is decoded here.
+    pub apps: [u64; 32],
 }
 
 #[derive(Default)]
@@ -235,6 +238,7 @@ impl PadDecoder {
     }
 
     fn subfield(&mut self, app: u8, data: &[u8], events: &mut Vec<PadEvent>) {
+        self.stats.apps[(app & 31) as usize] += 1;
         match app {
             1 => {
                 // Data group length indicator: rfa (2), length (14), CRC.
