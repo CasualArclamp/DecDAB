@@ -24,7 +24,7 @@ cargo run --release -p decdab-gui -- CAPTURE --play SERVICE --fps 30 --record-vi
 cargo run --release -p decdab-engine --example threshold -- captures/11a_long_216.928MHz_4.096Msps_amp.cs8 "absolute 80" 12 -12 -10 -8 -6   # MER where decoding breaks
 cargo run --release -p decdab-ofdm --example sound_probe -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8   # the sounder's rows: common phase step and power, row by row (frame-periodic faults show here)
 cargo run --release -p decdab-ofdm --example tii_probe -- captures/11a_long_216.928MHz_4.096Msps_amp.cs8 20   # the SFN's transmitters (TII): ids, levels, delays, and the comb × group grid
-cargo run --release -p decdab-cli -- decode captures/12b_long_225.648MHz_4.096Msps_amp.cs8 -s "BBC Guide" --slides out/guide   # a packet-mode data service (SPI): logos, EPG XML and the MOT directory
+cargo run --release -p decdab-cli -- decode captures/12b_spi_225.648MHz_2.048Msps_amp.cs8 -s "BBC Guide" --slides out/guide   # a packet-mode data service (SPI): logos, EPG XML and the MOT directory (330 s: the whole carousel)
 cargo run -p decdab-gui --example make_icon                           # redraws apps/decdab-gui/assets/icon.ico and icon-256.png (preview in out/)
 cargo run --release -p decdab-ofdm --example fic_probe -- captures/12a_223.936MHz_4.096Msps_amp.cs8   # per-frame lock figures and FIB CRCs
 ```
