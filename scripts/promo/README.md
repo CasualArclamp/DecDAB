@@ -15,3 +15,13 @@ python -I promo.py      # DecDAB_promo.mp4
 ```
 
 The crops in promo.py assume a 1400×860 window at 100 % scaling.
+
+## The 0.2 feature video
+
+`features.py` cuts a second video the same way (same beat, `promo.py`'s
+helpers), from two clips: `clip_guide` (the 330 s 12B recording, Radio 4,
+`--bottom guide --record-from 317`, when the schedules are in) and
+`clip_sfn` (11A, `--bottom sfn --record-from 10`), each cropped to
+1400×705, with `icon.png` (the app's `icon-256.png`) beside them. Run it
+from `out/promo2`: `python -I ../../scripts/promo/features.py` writes
+`DecDAB_0.2_features.mp4`.
