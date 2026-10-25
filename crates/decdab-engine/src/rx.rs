@@ -34,7 +34,9 @@ use crate::spectrum::RowBuilder;
 pub struct RxOptions {
     pub fft: usize,
     pub rows_per_s: f64,
-    /// FFT segments averaged into each row: the waterfall's whole cost.
+    /// FFT segments averaged into each row at `rows_per_s`: the waterfall's
+    /// whole cost. At other row rates the segments a row scale so the
+    /// segments a second stay the same.
     pub segments_per_row: u32,
     /// Play the chosen service on the sound card (off: decode and count).
     pub sound: bool,
@@ -100,8 +102,10 @@ pub enum Command {
     Select(Option<u32>),
     /// Make the scopes' view of each frame while on.
     Scopes(bool),
-    /// Rows three times as often, each a third the work (60 fps display).
-    Smooth(bool),
+    /// The display's frame rate: the waterfall makes one row a frame, so it
+    /// scrolls a row a frame; the receiver's results are handed over as
+    /// often (between 10 and 30 times a second).
+    DisplayFps(f64),
     FrontEnd(FrontEndSettings),
     /// Start recording to this file (cs8), or stop with `None`.
     Record(Option<PathBuf>),
@@ -373,20 +377,14 @@ fn run(
                     }
                 }
                 Ok(Command::FrontEnd(f)) => front.settings = f,
-                Ok(Command::Smooth(on)) => {
-                    (rows_per_s, segments, publish) = if on {
-                        (
-                            opts.rows_per_s * 3.0,
-                            (opts.segments_per_row / 3).max(1),
-                            Duration::from_millis(33),
-                        )
-                    } else {
-                        (
-                            opts.rows_per_s,
-                            opts.segments_per_row,
-                            Duration::from_millis(100),
-                        )
-                    };
+                Ok(Command::DisplayFps(fps)) => {
+                    let fps = fps.clamp(1.0, 120.0);
+                    rows_per_s = fps;
+                    // The same FFT segments a second at any row rate.
+                    segments = ((opts.segments_per_row as f64 * opts.rows_per_s / fps).round()
+                        as u32)
+                        .max(1);
+                    publish = Duration::from_secs_f64((1.0 / fps).clamp(1.0 / 30.0, 0.1));
                     builder = RowBuilder::new(opts.fft, rate, rows_per_s, segments);
                 }
                 Ok(Command::Retune(hz)) => match source.retune(hz) {

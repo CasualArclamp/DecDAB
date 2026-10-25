@@ -42,8 +42,6 @@ const GREEN: Color32 = Color32::from_rgb(110, 220, 130);
 
 /// Height of the scopes panel.
 const SCOPES_PANEL_H: f32 = 250.0;
-/// The display rate from which the smooth mode (60 frames a second) applies.
-const SMOOTH_FPS: f64 = 45.0;
 /// The display rates the list offers.
 const FPS_CHOICES: [f64; 6] = [5.0, 10.0, 15.0, 20.0, 30.0, 60.0];
 /// HackRF sample rates: DAB's 2.048 MS/s and its multiples (the front end
@@ -352,8 +350,11 @@ struct App {
     sdr_open: bool,
     optimiser: Option<sdr::Optimiser>,
     opt_result: Option<String>,
-    smooth_mode: bool,
-    smooth_sent: bool,
+    /// The display rate the engine was last told (it makes a waterfall row
+    /// a frame), and the rows come but not yet shown: one goes on the
+    /// waterfall each frame, so it scrolls evenly.
+    fps_sent: Option<f64>,
+    rows_due: std::collections::VecDeque<Row>,
     keeper: Option<remember::Keeper>,
     recorder: Option<recorder::Recorder>,
     radio: (Block, f64),
@@ -434,8 +435,8 @@ impl App {
             sdr_open: opts.window.as_deref() == Some("sdr"),
             optimiser: None,
             opt_result: None,
-            smooth_mode: opts.fps >= SMOOTH_FPS,
-            smooth_sent: false,
+            fps_sent: None,
+            rows_due: std::collections::VecDeque::new(),
             keeper: None,
             recorder: None,
             radio: (block, tune_hz),
@@ -548,7 +549,8 @@ impl App {
                 self.vfo_hz = vfo;
                 self.reset_view();
                 self.note.clear();
-                (self.scopes_sent, self.sdr_sent, self.smooth_sent) = (false, None, false);
+                (self.scopes_sent, self.sdr_sent, self.fps_sent) = (false, None, None);
+                self.rows_due.clear();
                 self.optimiser = None;
             }
             Err(e) => self.note = e,
@@ -579,6 +581,7 @@ impl App {
 
     fn reset_view(&mut self) {
         self.history.reset();
+        self.rows_due.clear();
         self.smooth.clear();
         self.span_hz = 0.0;
         self.scope.reset();
@@ -756,15 +759,16 @@ impl App {
         self.sdr.save();
     }
 
-    fn sync_smooth(&mut self) {
-        self.smooth_mode = self.opts.fps >= SMOOTH_FPS;
+    /// The waterfall's row rate follows the display rate: a row a frame.
+    fn sync_fps(&mut self) {
+        let fps = self.opts.fps;
         let Some(s) = &self.session else { return };
-        if self.smooth_sent != self.smooth_mode {
-            s.rx.send(Command::Smooth(self.smooth_mode));
-            self.smooth_sent = self.smooth_mode;
+        if self.fps_sent != Some(fps) {
+            s.rx.send(Command::DisplayFps(fps));
+            self.fps_sent = Some(fps);
         }
-        let rows_per_s = if self.smooth_mode { 60.0 } else { 20.0 };
-        self.history.set_capacity((25.0 * rows_per_s) as usize);
+        // Twenty-five seconds of waterfall at any rate.
+        self.history.set_capacity((25.0 * fps) as usize);
     }
 
     fn start_optimiser(&mut self) {
@@ -899,14 +903,31 @@ impl App {
                 }
             }
         }
-        for row in rows {
+        // The rows wait in a queue and one goes on each frame, so the
+        // waterfall moves a row a frame even when the engine's rows and the
+        // frames do not fall in step; a queue that grows (the display slower
+        // than asked) is caught up two rows a frame, and one that has run
+        // far behind is cut.
+        self.rows_due.extend(rows);
+        let backlog = self.rows_due.len();
+        if backlog > (self.opts.fps as usize).max(10) {
+            self.rows_due.drain(..backlog - 2);
+        }
+        let take = match self.rows_due.len() {
+            0 => 0,
+            n if n > 3 => 2,
+            _ => 1,
+        };
+        // The trace's smoothing: a time constant of about 0.12 s, whatever
+        // the row rate.
+        let pull = 1.0 - (-1.0 / (0.12 * self.opts.fps.max(1.0)) as f32).exp();
+        for row in self.rows_due.drain(..take).collect::<Vec<_>>() {
             if row.tuning != self.tuning {
                 self.tuning = row.tuning;
                 self.reset_view();
             }
             self.centre_hz = row.center_hz;
             self.span_hz = row.sample_rate;
-            let pull = if self.smooth_sent { 0.14 } else { 0.35 };
             if self.smooth.len() != row.db.len() {
                 self.smooth.clone_from(&row.db);
             } else {
@@ -1188,13 +1209,10 @@ impl App {
                 .selected_text(format!("{} fps", self.opts.fps))
                 .width(70.0)
                 .show_ui(ui, |ui| {
+                    // The waterfall scrolls a row a frame: the rate is also
+                    // its speed.
                     for f in FPS_CHOICES {
-                        let label = if f >= SMOOTH_FPS {
-                            format!("{f} fps (smooth)")
-                        } else {
-                            format!("{f} fps")
-                        };
-                        ui.selectable_value(&mut self.opts.fps, f, label);
+                        ui.selectable_value(&mut self.opts.fps, f, format!("{f} fps"));
                     }
                 });
             if !self.note.is_empty() {
@@ -1381,7 +1399,7 @@ impl eframe::App for App {
         self.sync_play();
         self.sync_scopes();
         self.sync_sdr();
-        self.sync_smooth();
+        self.sync_fps();
         self.optimise_tick();
         self.apply_dial(ctx);
         self.remember(ctx);
