@@ -106,6 +106,17 @@ label (application types 0, 2, 3: no 1, 12 or 13), and the FIC has no FIG
 path (length indicator, MOT start and continuation subfields among DLS
 fields) and gets it back whole, so the decoder would show one.
 
+**Logos on 12C, and a cache** (2026-10-25). 12C's Station Logos service
+is Arqiva's shared SPI feed for D1 National, London 1 and SDL National: 236
+objects, 1.6 MB, randomly named (`10f4z`), so about 27 minutes a turn at 8
+kbit/s; a 10-minute recording got D1's SI file but not London 1's, so no 12C
+service could be matched (and 92 of 346 data groups were lost to packet
+errors, which packet FEC would mend). The store now keeps every SI file (it
+kept only the last) and matches a dotted id's SId field exactly. Logos
+matched to a service are saved to `%APPDATA%\DecDAB\logos` (`C1C0_128x128.png`)
+and drawn from there until the air brings them: after the 12C run, 11D showed
+Absolute Radio's and Heart 70s/80s's logos without any SPI of its own.
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the
@@ -113,7 +124,8 @@ fields) and gets it back whole, so the decoder would show one.
 - Ensemble label shows the EId until FIG 1/0 arrives (the CLI picks the
   service after 10 frames).
 - Packet mode carries SPI only so far (Journaline, TPEG not wired); a
-  schedule takes up to one carousel (about 270 s on 12B) to arrive; packet FEC
+  schedule or logo takes up to one carousel (270 s on 12B, ~27 min on
+  12C's shared feed) to arrive; packet FEC
   parity is skipped, not used. No modulator yet; the X-PAD slideshow has
   not been seen on air.
 - TII names no transmitters (no database); a weak TII (the 130 µs path)

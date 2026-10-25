@@ -66,7 +66,12 @@ impl Mentions {
             format!("{sid:04x}")
         };
         self.bytes.iter().any(|b| b.windows(be.len()).any(|w| w == be))
-            || self.texts.iter().any(|t| t.to_lowercase().contains(&hex))
+            || self.texts.iter().any(|t| match dotted_sid(t) {
+                // A dotted id (e1.c181.c1c0.0): its SId field, exactly.
+                Some(x) => x == sid,
+                // A name (siC22401.png, w20261025dC224c0.EHB): the SId in it.
+                None => t.to_lowercase().contains(&hex),
+            })
     }
 
     fn add_value(&mut self, v: &EpgValue) {
@@ -91,13 +96,26 @@ struct SiService {
     urls: Vec<String>,
 }
 
+/// The SId of a TS 102 818 dotted id: "e1.c181.c1c0.0" or
+/// "dab:e1.c181.c1c0.0" (ECC, EId, SId, SCIdS).
+fn dotted_sid(t: &str) -> Option<u32> {
+    let t = t.strip_prefix("dab:").unwrap_or(t);
+    let parts: Vec<&str> = t.split('.').collect();
+    (parts.len() == 4)
+        .then(|| u32::from_str_radix(parts[2], 16).ok())
+        .flatten()
+}
+
 /// Everything the SPI services have delivered.
 #[derive(Debug, Clone, Default)]
 pub struct SpiStore {
     /// By object name: a newer version replaces the old.
     logos: BTreeMap<String, Logo>,
     schedules: BTreeMap<String, Schedule>,
-    si: Vec<SiService>,
+    /// The service information files, by object name: one SPI service may
+    /// carry several ensembles' (Arqiva's on 12C has D1's, London 1's and
+    /// SDL's).
+    si: BTreeMap<String, Vec<SiService>>,
     /// Bumped by every change, so a GUI can tell.
     pub generation: u64,
     /// Objects received.
@@ -138,7 +156,7 @@ impl SpiStore {
                 self.objects += 1;
                 self.generation += 1;
                 match header.content_subtype {
-                    0 => self.service_information(&root),
+                    0 => self.service_information(name, &root),
                     1 => {
                         let mut m = Mentions::default();
                         m.texts.push(name.clone());
@@ -201,7 +219,7 @@ impl SpiStore {
         self.logos.insert(logo.name.clone(), logo);
     }
 
-    fn service_information(&mut self, root: &EpgElement) {
+    fn service_information(&mut self, name: String, root: &EpgElement) {
         let mut si = Vec::new();
         walk(root, &mut |e| {
             if e.name != "service" {
@@ -227,7 +245,7 @@ impl SpiStore {
             si.push(s);
         });
         if !si.is_empty() {
-            self.si = si;
+            self.si.insert(name, si);
         }
     }
 
@@ -240,7 +258,8 @@ impl SpiStore {
     pub fn logos(&self, sid: u32) -> Vec<&Logo> {
         let from_si: Vec<&str> = self
             .si
-            .iter()
+            .values()
+            .flatten()
             .filter(|s| s.mentions.names(sid))
             .flat_map(|s| s.urls.iter().map(String::as_str))
             .collect();
@@ -258,6 +277,26 @@ impl SpiStore {
                 }
             })
             .collect()
+    }
+
+    /// Every service the SI files name (any ensemble) whose logos have
+    /// arrived, with them: what a cache on disk keeps.
+    pub fn matched(&self) -> Vec<(u32, Vec<&Logo>)> {
+        let mut out: Vec<(u32, Vec<&Logo>)> = Vec::new();
+        for s in self.si.values().flatten() {
+            let Some(sid) = s.mentions.texts.iter().find_map(|t| dotted_sid(t)) else {
+                continue;
+            };
+            let logos: Vec<&Logo> = s
+                .urls
+                .iter()
+                .filter_map(|u| self.logos.values().find(|l| basename(&l.name) == u))
+                .collect();
+            if !logos.is_empty() && !out.iter().any(|(x, _)| *x == sid) {
+                out.push((sid, logos));
+            }
+        }
+        out
     }
 
     /// The service's logo nearest `width` pixels wide, at least that wide if

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use decdab_codecs::{AacDecoder, Mp2Decoder, Pcm};
 use decdab_data::DataEvent;
 use decdab_data::pad::{PadDecoder, PadEvent, dl_plus_name};
-use decdab_engine::DataServiceDecoder;
+use decdab_engine::{DataServiceDecoder, SpiStore};
 use decdab_fic::{Ensemble, FicDecoder, Service};
 use decdab_msc::{SubChannelDecoder, SuperframeDecoder, au_pad};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
@@ -136,6 +136,7 @@ pub fn run(a: DecodeArgs) -> Result<()> {
     let mut data: Option<(DataServiceDecoder, String)> = None;
     let mut data_events: Vec<DataEvent> = Vec::new();
     let mut objects = 0usize;
+    let mut spi = SpiStore::default();
     let mut wav: Option<Wav> = None;
     let out_path = a.out.clone();
     let (mut buf, mut dec) = (Vec::new(), Vec::new());
@@ -244,6 +245,7 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                 t_msc += t.elapsed().as_secs_f64();
                 for ev in data_events.drain(..) {
                     objects += 1;
+                    spi.push(ev.clone());
                     save_object(read as f64 / rate, ev, a.slides.as_deref())?;
                 }
                 continue;
@@ -385,6 +387,17 @@ pub fn run(a: DecodeArgs) -> Result<()> {
         }
         let s = d.data_stats();
         println!("; {objects} objects, {} data-group errors", s.data_group_errors);
+        let matched = spi.matched();
+        if !matched.is_empty() {
+            let list: Vec<String> = matched
+                .iter()
+                .map(|(sid, l)| {
+                    let name = fic.ensemble.services.get(sid).map_or(String::new(), |s| format!(" {}", s.name()));
+                    format!("{sid:04X}{name} ({})", l.len())
+                })
+                .collect();
+            println!("logos matched through the SI files, by SId: {}", list.join(", "));
+        }
         if let Some(dir) = d.mot().and_then(|m| m.directory()) {
             let total: u32 = dir.entries.iter().map(|e| e.header.body_size).sum();
             println!(

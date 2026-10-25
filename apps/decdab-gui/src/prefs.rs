@@ -6,13 +6,17 @@
 
 use std::path::PathBuf;
 
-fn file() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
+/// The app's own folder: `%APPDATA%\DecDAB` (`~/.config/decdab` elsewhere).
+pub fn dir() -> Option<PathBuf> {
+    if cfg!(windows) {
         std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("DecDAB"))
     } else {
         std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".config").join("decdab"))
-    }?;
-    Some(base.join("prefs.txt"))
+    }
+}
+
+fn file() -> Option<PathBuf> {
+    Some(dir()?.join("prefs.txt"))
 }
 
 pub fn get(key: &str) -> Option<String> {

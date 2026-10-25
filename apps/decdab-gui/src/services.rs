@@ -173,7 +173,10 @@ pub fn now_playing(ui: &mut Ui, np: &NowPlaying, volume: &mut f32) -> Option<Act
         }
     }
     // The slideshow.
-    if let Some(tex) = np.slide.or(np.big_logo.as_ref()) {
+    // A logo stands in for the slideshow only if it is big enough not to
+    // be blown up into a blur (the cache may have only the 32 px one).
+    let big = np.big_logo.as_ref().filter(|t| t.size()[0] >= 120);
+    if let Some(tex) = np.slide.or(big) {
         let w = (ui.available_width() - 8.0).min(320.0);
         let [tw, th] = tex.size();
         let h = w * th as f32 / tw.max(1) as f32;
