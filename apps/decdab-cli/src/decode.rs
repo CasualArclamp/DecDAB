@@ -30,6 +30,11 @@ pub struct DecodeArgs {
     /// WAV file to write.
     #[arg(short, long)]
     pub out: Option<PathBuf>,
+    /// A test: throw away the soft bits of these carriers, in kHz from the
+    /// centre ("384:768" is the top quarter of the band), as if that part
+    /// of the band were wiped out.
+    #[arg(long, value_name = "LO:HI")]
+    pub erase_khz: Option<String>,
     /// Folder for the slideshow's images (and other MOT objects).
     #[arg(long)]
     pub slides: Option<PathBuf>,
@@ -117,6 +122,13 @@ pub fn run(a: DecodeArgs) -> Result<()> {
     let rate = src.sample_rate();
     let mut fe = Frontend::new(rate).map_err(anyhow::Error::msg)?;
     let mut demod = Demod::new();
+    if let Some(e) = &a.erase_khz {
+        let (lo, hi) = e
+            .split_once(':')
+            .and_then(|(l, h)| Some((l.trim().parse::<i32>().ok()?, h.trim().parse::<i32>().ok()?)))
+            .context("--erase-khz wants LO:HI, e.g. 384:768")?;
+        demod.set_erase(Some((lo.min(hi), lo.max(hi))));
+    }
     let mut fic = FicDecoder::new();
     let mut sub: Option<(SubChannelDecoder, Audio, String)> = None;
     let mut wav: Option<Wav> = None;

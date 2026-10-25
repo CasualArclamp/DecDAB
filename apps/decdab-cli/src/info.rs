@@ -80,8 +80,8 @@ pub fn run(what: &str, seconds: f64, gains: Gains) -> Result<()> {
     );
     println!();
     println!(
-        "{:<18} {:<9} {:<6} {:>5} {:>5} {:>4} {:>8}  {:<17} apps",
-        "service", "short", "SId", "SubCh", "CU", "kbps", "prot", "type"
+        "{:<18} {:<9} {:<6} {:>5} {:>9} {:>4} {:>8}  {:<17} apps",
+        "service", "short", "SId", "SubCh", "CUs", "kbps", "prot", "type"
     );
     for s in e.services_by_name() {
         for (i, c) in s.components.iter().enumerate() {
@@ -105,12 +105,12 @@ pub fn run(what: &str, seconds: f64, gains: Gains) -> Result<()> {
                 (String::new(), String::new(), String::new())
             };
             println!(
-                "{:<18} {:<9} {:<6} {:>5} {:>5} {:>4} {:>8}  {:<17} {}{}",
+                "{:<18} {:<9} {:<6} {:>5} {:>9} {:>4} {:>8}  {:<17} {}{}",
                 name,
                 short,
                 sid,
                 sub.map_or("-".into(), |x| x.id.to_string()),
-                sub.map_or("-".into(), |x| x.size.to_string()),
+                sub.map_or("-".into(), |x| format!("{}-{}", x.start, x.start + x.size - 1)),
                 sub.map_or("-".into(), |x| x.bitrate().to_string()),
                 sub.map_or("-".into(), |x| x.protection_name()),
                 kind,

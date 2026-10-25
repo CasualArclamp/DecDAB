@@ -150,6 +150,9 @@ pub struct Demod {
     n_of: Vec<u16>,
     frames: u64,
     scopes_on: bool,
+    /// A test: carriers whose soft bits are thrown away (made 0, "not
+    /// known"), as if that part of the band were wiped out.
+    erase: Option<(i32, i32)>,
     /// Per symbol of a CIF and QPSK symbol (18 × 1536): whether either bit
     /// of the cell is the scoped sub-channel's.
     msc_mask: Option<Vec<bool>>,
@@ -222,6 +225,7 @@ impl Demod {
             n_of,
             frames: 0,
             scopes_on: false,
+            erase: None,
             msc_mask: None,
             sounding: false,
             sound: Vec::new(),
@@ -295,6 +299,13 @@ impl Demod {
             }
             self.sound.push(row);
         }
+    }
+
+    /// A test: throw away the soft bits of carriers `lo`…`hi` (k, 1 kHz
+    /// each), or none. Shows where each service's bits are in frequency:
+    /// all over the band, so every service suffers alike.
+    pub fn set_erase(&mut self, carriers: Option<(i32, i32)>) {
+        self.erase = carriers;
     }
 
     /// Make each frame's [`Scope`] (costs a little; off by default).
@@ -628,8 +639,16 @@ impl Demod {
                 let z = *d * derot / p.norm().max(1e-30) * scale;
                 *d = z;
                 let n = self.n_of[i] as usize;
-                self.soft[base + n] = z.re.clamp(-127.0, 127.0) as i8;
-                self.soft[base + CARRIERS + n] = z.im.clamp(-127.0, 127.0) as i8;
+                if self
+                    .erase
+                    .is_some_and(|(lo, hi)| (lo..=hi).contains(&carrier_of(i)))
+                {
+                    self.soft[base + n] = 0;
+                    self.soft[base + CARRIERS + n] = 0;
+                } else {
+                    self.soft[base + n] = z.re.clamp(-127.0, 127.0) as i8;
+                    self.soft[base + CARRIERS + n] = z.im.clamp(-127.0, 127.0) as i8;
+                }
                 // MER against the nearest QPSK point.
                 let a = z.norm() * std::f32::consts::FRAC_1_SQRT_2;
                 let ideal = Iq::new(a.copysign(z.re), a.copysign(z.im));
