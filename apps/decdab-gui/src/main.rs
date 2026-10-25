@@ -1455,7 +1455,12 @@ impl eframe::App for App {
                 .resizable(false)
                 .show(ui, |ui| {
                     ui.set_min_height(SCOPES_PANEL_H);
-                    self.scope.show(ui, header);
+                    let playing = self
+                        .dab
+                        .playing
+                        .and_then(|sid| self.ensemble.services.get(&sid))
+                        .map(|s| s.name());
+                    self.scope.show(ui, header, playing.as_deref());
                 });
         }
         egui::Panel::right("services")

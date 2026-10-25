@@ -29,7 +29,7 @@ use rustfft::{Fft, FftPlanner};
 
 use crate::params::{
     BITS_PER_SYMBOL, CARRIERS, DATA_SYMBOLS, FFT, FRAME, GUARD, NULL, SAMPLE_RATE, SYMBOL, SYMBOLS,
-    bin,
+    SYMBOLS_PER_CIF, bin,
 };
 use crate::tables::{carrier, prs_bins};
 
@@ -82,6 +82,9 @@ pub struct Scope {
     /// symbols, at unit mean amplitude: the ideal points are at ±45°, ±135°.
     pub fic: Vec<Iq>,
     pub msc: Vec<Iq>,
+    /// The MSC points are the cells of one sub-channel (see
+    /// [`Demod::set_scope_subchannel`]), not a sample of all.
+    pub msc_selected: bool,
     /// Per active carrier (k = −768…768 less 0): its frequency from the
     /// centre (MHz), the channel's gain from the phase reference (dB about
     /// the mean) and the DQPSK signal-to-noise ratio over the frame (dB).
@@ -136,6 +139,9 @@ pub struct Demod {
     n_of: Vec<u16>,
     frames: u64,
     scopes_on: bool,
+    /// Per symbol of a CIF and QPSK symbol (18 × 1536): whether either bit
+    /// of the cell is the scoped sub-channel's.
+    msc_mask: Option<Vec<bool>>,
     scope: Scope,
     /// Per carrier, the frame's DQPSK error and signal power.
     err: Vec<f32>,
@@ -192,6 +198,7 @@ impl Demod {
             n_of,
             frames: 0,
             scopes_on: false,
+            msc_mask: None,
             scope: Scope::default(),
             err: vec![0.0; CARRIERS],
             sig: vec![0.0; CARRIERS],
@@ -201,6 +208,23 @@ impl Demod {
     /// Make each frame's [`Scope`] (costs a little; off by default).
     pub fn set_scopes(&mut self, on: bool) {
         self.scopes_on = on;
+    }
+
+    /// The MSC scope shows the cells of the sub-channel at capacity units
+    /// `start`, `size` (a service playing), or with `None` a sample of the
+    /// whole MSC. A sub-channel's bits fill a run of each CIF's bits (EN 300
+    /// 401 §14.5): bit b of symbol s of a CIF is the real part of QPSK symbol
+    /// b (b < 1536) or the imaginary part of QPSK symbol b − 1536.
+    pub fn set_scope_subchannel(&mut self, cus: Option<(u16, u16)>) {
+        self.msc_mask = cus.map(|(start, size)| {
+            let mut m = vec![false; SYMBOLS_PER_CIF * CARRIERS];
+            let (a, b) = (start as usize * 64, (start as usize + size as usize) * 64);
+            for bit in a..b.min(SYMBOLS_PER_CIF * BITS_PER_SYMBOL) {
+                let (s, k) = (bit / BITS_PER_SYMBOL, bit % BITS_PER_SYMBOL);
+                m[s * CARRIERS + k % CARRIERS] = true;
+            }
+            m
+        });
     }
 
     pub fn is_locked(&self) -> bool {
@@ -382,6 +406,7 @@ impl Demod {
             let sc = &mut self.scope;
             sc.fic.clear();
             sc.msc.clear();
+            sc.msc_selected = self.msc_mask.is_some();
             let mean = self.prev.iter().map(|z| z.norm_sqr()).sum::<f32>() / CARRIERS as f32;
             sc.gain_db.clear();
             sc.gain_db.extend(
@@ -485,11 +510,11 @@ impl Demod {
             let scale = SOFT_SCALE * CARRIERS as f32 / amp.max(1e-30);
             let base = (l - 1) * BITS_PER_SYMBOL;
             let scopes_on = self.scopes_on;
-            // Which symbols the scopes take, and how sparsely.
-            let take = match l {
-                1..=3 | 20 | 40 | 60 => 2,
-                _ => 0,
-            };
+            // Which cells the scopes take: every other one of the FIC's;
+            // of the MSC's, the scoped sub-channel's (all four CIFs), or a
+            // sample of every symbol's (a cell in 18, about as many).
+            let mask = self.msc_mask.as_deref();
+            let cif_sym = if l > 3 { (l - 4) % SYMBOLS_PER_CIF } else { 0 };
             for (i, (d, p)) in self.diff.iter_mut().zip(&self.prev).enumerate() {
                 // d/|prev|: the new carrier's amplitude, the phase step.
                 let z = *d * derot / p.norm().max(1e-30) * scale;
@@ -506,13 +531,16 @@ impl Demod {
                 if scopes_on {
                     self.err[i] += e;
                     self.sig[i] += g;
-                    if take > 0 && i % take == 0 {
-                        let pt = z / SOFT_SCALE;
-                        if l <= 3 {
+                    let pt = z / SOFT_SCALE;
+                    if l <= 3 {
+                        if i % 2 == 0 {
                             self.scope.fic.push(pt);
-                        } else {
-                            self.scope.msc.push(pt);
                         }
+                    } else if match mask {
+                        Some(m) => m[cif_sym * CARRIERS + n],
+                        None => i % 18 == l % 18,
+                    } {
+                        self.scope.msc.push(pt);
                     }
                 }
             }

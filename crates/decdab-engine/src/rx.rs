@@ -363,6 +363,7 @@ fn run(
                 Ok(Command::Select(sid)) => {
                     want_service = sid;
                     if let Some(r) = &mut rx {
+                        r.demod.set_scope_subchannel(None);
                         r.service = None;
                         r.player = None;
                         r.dls = None;
@@ -492,6 +493,7 @@ fn run(
                         && let Some(sc) = e.subchannel_of(comp)
                         && let Some(d) = ServiceDecoder::new(comp, *sc)
                     {
+                        r.demod.set_scope_subchannel(Some((sc.start, sc.size)));
                         r.service = Some((sid, d));
                         if opts.sound {
                             match AudioPlayer::start_pcm(&svc.name(), OutputKind::Device) {

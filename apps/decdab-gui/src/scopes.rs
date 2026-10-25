@@ -48,6 +48,8 @@ struct Phosphor {
     /// The half-range of the picture, cell units.
     range: f32,
     name: &'static str,
+    /// What the scope's corner says (its name unless set).
+    title: String,
 }
 
 impl Phosphor {
@@ -59,6 +61,7 @@ impl Phosphor {
             dirty: true,
             range: RANGE,
             name,
+            title: name.to_string(),
         }
     }
 
@@ -146,6 +149,7 @@ pub struct ScopeView {
     pending: Vec<Arc<Measurements>>,
     seen: bool,
     measurements: Option<Arc<Measurements>>,
+    msc_selected: bool,
 }
 
 impl Default for ScopeView {
@@ -155,6 +159,7 @@ impl Default for ScopeView {
             pending: Vec::new(),
             seen: false,
             measurements: None,
+            msc_selected: false,
         }
     }
 }
@@ -173,10 +178,21 @@ impl ScopeView {
         }
     }
 
-    /// `header`: what the receiver reports, for the line over the scopes.
-    pub fn show(&mut self, ui: &mut Ui, header: Option<String>) {
+    /// `header`: what the receiver reports, for the line over the scopes;
+    /// `service`: the service whose cells the MSC scope shows, if one plays.
+    pub fn show(&mut self, ui: &mut Ui, header: Option<String>, service: Option<&str>) {
+        self.scopes[1].title = match service.filter(|_| self.msc_selected) {
+            Some(name) => format!("MSC · {name}"),
+            None => "MSC · all sub-channels".to_string(),
+        };
         for s in std::mem::take(&mut self.pending) {
             self.scopes[0].add(&s.fic, Some(1.0));
+            // The MSC scope's cells change from one sample to another when a
+            // service starts or stops: the old ones go.
+            if s.msc_selected != self.msc_selected {
+                self.scopes[1].cells.clear();
+                self.msc_selected = s.msc_selected;
+            }
             self.scopes[1].add(&s.msc, Some(1.0));
             self.seen = true;
             self.measurements = Some(s);
@@ -230,11 +246,7 @@ fn scope(ui: &mut Ui, size: egui::Vec2, ph: &mut Phosphor, seen: bool, marks: &[
     let rect = resp.rect;
     p.rect_filled(rect, CornerRadius::ZERO, PANEL_BG);
     let font = FontId::monospace(11.0);
-    let title = if ph.name == "raw" {
-        "raw (scaled to fit)"
-    } else {
-        ph.name
-    };
+    let title = ph.title.as_str();
     p.text(
         rect.left_top() + vec2(4.0, 1.0),
         Align2::LEFT_TOP,
