@@ -99,6 +99,13 @@ Here: 08/23 first, 11/01 and 11/02 33 µs later on 11A; 08/23 then
 lists them (level, delay, extra km, path level) over the impulse response and
 the comb × group grid.
 
+**Album art on 11A** (2026-10-25). A 240 s recording of SDL National: none
+of its 30 services sends a slideshow. Every X-PAD carries only the dynamic
+label (application types 0, 2, 3: no 1, 12 or 13), and the FIC has no FIG
+0/13 in a minute (7488 FIBs). A test now feeds a picture through the X-PAD
+path (length indicator, MOT start and continuation subfields among DLS
+fields) and gets it back whole, so the decoder would show one.
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the

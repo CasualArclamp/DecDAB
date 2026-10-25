@@ -183,6 +183,11 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                     }
                     continue;
                 };
+                // Its label (FIG 1/1) can come a few frames after the
+                // service: wait a little for it, so the report names it.
+                if svc.label.is_none() && frames < 60 {
+                    continue;
+                }
                 let comp = svc.primary().context("service has no components")?;
                 let Some(sc) = e.subchannel_of(comp) else {
                     continue;

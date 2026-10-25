@@ -445,6 +445,62 @@ mod tests {
         );
     }
 
+    /// A slideshow picture as a station sends it in the X-PAD (TS 101 499):
+    /// each MOT data group announced by a data group length indicator (app 1)
+    /// and carried in MOT start (12) and continuation (13) subfields of 48
+    /// bytes, behind running DLS fields.
+    #[test]
+    fn slideshow_picture_out_of_variable_xpad() {
+        use crate::mot::MotEncoder;
+        let mut pic = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        pic.extend((0..600u32).map(|i| (i * 7 + 3) as u8));
+        pic.extend([0xFF, 0xD9]);
+        let mut enc = MotEncoder::header_mode();
+        enc.set_segment_size(200).unwrap();
+        enc.add_file("cover.jpg", pic.clone()).unwrap();
+        let mut dec = PadDecoder::new();
+        let mut ev = Vec::new();
+        for _ in 0..20 {
+            let Some(group) = enc.next_data_group() else { break };
+            // The length indicator: rfa 00, 14-bit length, CRC.
+            let mut dgli = vec![(group.len() >> 8) as u8 & 0x3F, group.len() as u8];
+            let c = crc16_ccitt(&dgli);
+            dgli.extend_from_slice(&c.to_be_bytes());
+            for (i, chunk) in group.chunks(48).enumerate() {
+                let mut x = Vec::new();
+                let mut sub = chunk.to_vec();
+                sub.resize(48, 0);
+                if i == 0 {
+                    // CI: 4 bytes of app 1, 48 bytes of app 12, end.
+                    x.extend([1, (7 << 5) | 12, 0]);
+                    x.extend_from_slice(&dgli);
+                } else {
+                    x.extend([(7 << 5) | 13, 0]);
+                }
+                x.extend_from_slice(&sub);
+                dec.push(&field(&x, true, true), &mut ev);
+            }
+            // A label between the groups, as on air.
+            let mut l = vec![(4 << 5) | 2, 0];
+            let mut g = dls_group("Artist - Title", false);
+            g.resize(16, 0);
+            l.extend_from_slice(&g);
+            dec.push(&field(&l, true, true), &mut ev);
+            if ev.iter().any(|e| matches!(e, PadEvent::Mot { .. })) {
+                break;
+            }
+        }
+        let mot = ev.iter().find_map(|e| match e {
+            PadEvent::Mot { name, mime, data, .. } => Some((name.clone(), mime.clone(), data.clone())),
+            _ => None,
+        });
+        let (name, mime, data) = mot.expect("the picture");
+        assert_eq!((name.as_str(), mime.as_str()), ("cover.jpg", "image/jpeg"));
+        assert_eq!(data, pic);
+        assert_eq!(dec.stats.mot_errors, 0);
+        assert!(dec.stats.apps[1] > 0 && dec.stats.apps[12] > 0 && dec.stats.apps[13] > 0);
+    }
+
     #[test]
     fn dls_split_over_short_xpads() {
         let g = dls_group("Hello", true); // 9 bytes
