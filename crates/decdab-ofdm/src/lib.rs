@@ -13,5 +13,7 @@ pub mod frontend;
 pub mod params;
 pub mod tables;
 
-pub use demod::{Demod, Echo, Frame, FrameStats, Scope};
+pub use demod::{
+    Demod, Echo, Frame, FrameStats, SOUND_ROW_S, SOUND_ROWS, SOUND_SPACING_HZ, Scope,
+};
 pub use frontend::Frontend;

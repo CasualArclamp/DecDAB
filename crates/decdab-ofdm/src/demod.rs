@@ -112,7 +112,18 @@ pub struct Frame<'a> {
     pub stats: FrameStats,
     /// The scopes' view of it, while [`Demod::set_scopes`] is on.
     pub scope: Option<&'a Scope>,
+    /// The channel's transfer function at every other carrier (2 kHz
+    /// apart, k = −767, −765 … 767), [`SOUND_ROWS`] times a frame, while
+    /// [`Demod::set_sounding`] is on; empty otherwise.
+    pub sound: &'a [Vec<Iq>],
 }
+
+/// Channel rows a frame for the sounder: one every 12 ms.
+pub const SOUND_ROWS: usize = 8;
+/// Seconds between them.
+pub const SOUND_ROW_S: f64 = FRAME as f64 / SOUND_ROWS as f64 / SAMPLE_RATE;
+/// The spacing of a sounder row's samples, Hz (every other carrier).
+pub const SOUND_SPACING_HZ: f64 = 2000.0;
 
 enum State {
     Search,
@@ -142,6 +153,19 @@ pub struct Demod {
     /// Per symbol of a CIF and QPSK symbol (18 × 1536): whether either bit
     /// of the cell is the scoped sub-channel's.
     msc_mask: Option<Vec<bool>>,
+    /// The channel sounder: on or off, the rows of this frame, the symbols
+    /// they are taken at, and the channel estimate at each carrier (with a
+    /// buffer for the next).
+    sounding: bool,
+    sound: Vec<Vec<Iq>>,
+    sound_at: [usize; SOUND_ROWS],
+    hest: Vec<Iq>,
+    next_h: Vec<Iq>,
+    /// Per carrier, the turn that moves delay 0 from the FFT window's start
+    /// to the first path: e^{j2πk·ADVANCE/N}.
+    sound_raw: Vec<(usize, Vec<Iq>)>,
+    /// The sample clock's drift against the signal's, samples a frame.
+    drift: f64,
     scope: Scope,
     /// Per carrier, the frame's DQPSK error and signal power.
     err: Vec<f32>,
@@ -199,9 +223,77 @@ impl Demod {
             frames: 0,
             scopes_on: false,
             msc_mask: None,
+            sounding: false,
+            sound: Vec::new(),
+            // The symbol nearest each 12 ms of the frame (0 is the phase
+            // reference).
+            sound_at: std::array::from_fn(|r| {
+                let t = (r * FRAME / SOUND_ROWS) as f64;
+                ((t - NULL as f64 - SYMBOL as f64 / 2.0) / SYMBOL as f64)
+                    .round()
+                    .clamp(0.0, DATA_SYMBOLS as f64) as usize
+            }),
+            hest: vec![Iq::default(); CARRIERS],
+            next_h: vec![Iq::default(); CARRIERS],
+            sound_raw: Vec::new(),
+            drift: 0.0,
             scope: Scope::default(),
             err: vec![0.0; CARRIERS],
             sig: vec![0.0; CARRIERS],
+        }
+    }
+
+    /// Sound the channel: each frame's [`Frame::sound`] rows.
+    ///
+    /// DAB has no pilots but the phase reference, once a frame, which is too
+    /// seldom to see Doppler. So the estimate starts from the phase
+    /// reference and follows the signal symbol by symbol, decision-directed
+    /// (as DecDRM's estimates are): each cell is decided against the last
+    /// estimate smoothed over neighbouring carriers, and the transfer
+    /// function is the cell over the decided point, turned so its delays
+    /// count from the first path (the FFT window sits [`ADVANCE`] samples
+    /// before it). The residual carrier offset is left in, so the estimate
+    /// runs on smoothly from one frame's phase reference to the next (it is
+    /// a few hertz at most: the map's whole picture sits that far off 0).
+    pub fn set_sounding(&mut self, on: bool) {
+        self.sounding = on;
+    }
+
+    /// Keep a sounder row: the estimate at every other carrier, with the
+    /// symbol it was taken at (turned in [`Demod::finish_sound`], once the
+    /// frame's timing is known).
+    fn push_sound_row(&mut self, l: usize) {
+        self.sound_raw
+            .push((l, self.hest.iter().step_by(2).copied().collect()));
+    }
+
+    /// Turn the frame's sounder rows so their delays count from the first
+    /// path. The window sits [`ADVANCE`] samples before it, plus `offset`
+    /// (this frame's misalignment, put right only at the next frame), plus
+    /// the drift of the sample clock since the frame began (`drift` samples a
+    /// frame): left in, the drift and its whole-sample corrections at each
+    /// frame turn the rows by a sawtooth that shows as lines at the frame
+    /// rate (10.4 Hz) on the Doppler maps.
+    fn finish_sound(&mut self, offset: f64) {
+        self.sound.clear();
+        for (l, raw) in self.sound_raw.drain(..) {
+            let t = (NULL + l * SYMBOL + SYMBOL / 2) as f64 / FRAME as f64;
+            let delay = ADVANCE as f64 + offset + self.drift * t;
+            // e^{j2πk·delay/N} at k = −767, −765 …: a start and a step.
+            let w = std::f64::consts::TAU * delay / FFT as f64;
+            let step = Iq::from_polar(1.0, (2.0 * w) as f32);
+            let mut ph = Iq::from_polar(1.0, (-767.0 * w) as f32);
+            let mut row = Vec::with_capacity(raw.len());
+            for (i, h) in raw.iter().enumerate() {
+                // Carrier 0 is not used: the samples skip from −1 to 1, so
+                // the turn goes up by one carrier, not two, there.
+                if i == 384 {
+                    ph *= Iq::from_polar(1.0, (-w) as f32);
+                }
+                row.push(h * ph);
+                ph *= step;
+            }
+            self.sound.push(row);
         }
     }
 
@@ -402,6 +494,17 @@ impl Demod {
         // The phase reference, and from it the impulse response.
         self.spectrum(sym(0));
         Self::carriers(&self.work, &mut self.prev);
+        if self.sounding {
+            self.sound_raw.clear();
+            // The phase reference is known: the estimate starts exact.
+            let p = prs_bins();
+            for (i, (h, z)) in self.hest.iter_mut().zip(&self.prev).enumerate() {
+                *h = z * p[bin(carrier_of(i))].conj();
+            }
+            if self.sound_at.contains(&0) {
+                self.push_sound_row(0);
+            }
+        }
         if self.scopes_on {
             let sc = &mut self.scope;
             sc.fic.clear();
@@ -461,6 +564,11 @@ impl Demod {
             // Wanted at ADVANCE; move by whole samples, at most a guard's
             // worth at a time.
             step = (first - ADVANCE as i32).clamp(-(GUARD as i32), GUARD as i32);
+            // The sample clock's drift, samples a frame: the steps, averaged
+            // (a step that large is a jump, not drift).
+            if step.abs() <= 8 {
+                self.drift += 0.05 * (step as f64 - self.drift);
+            }
             if self.scopes_on {
                 let us = 1e6 / SAMPLE_RATE as f32;
                 let sc = &mut self.scope;
@@ -544,6 +652,47 @@ impl Demod {
                     }
                 }
             }
+            if self.sounding {
+                // Each cell decided coherently against the last estimate
+                // averaged over its neighbours (five carriers, well inside
+                // the coherence bandwidth of any echo within the guard), so
+                // a wrong decision is pulled back by them rather than
+                // carried on; the new estimate is the cell over the decided
+                // point (unit cells: z·x*).
+                let n = self.hest.len();
+                let mut acc = Iq::default();
+                for h in &self.hest[..2] {
+                    acc += h;
+                }
+                // The cells alternate between two constellations: the phase
+                // reference is on the axes and each symbol turns the last by
+                // ±45° or ±135° (EN 300 401 §14.5), so odd symbols are on the
+                // diagonals and even ones on the axes.
+                let diagonal = l % 2 == 1;
+                let q = std::f32::consts::FRAC_1_SQRT_2;
+                for i in 0..n {
+                    if i + 2 < n {
+                        acc += self.hest[i + 2];
+                    }
+                    if i >= 3 {
+                        acc -= self.hest[i - 3];
+                    }
+                    let z = self.cur[i];
+                    let c = z * acc.conj();
+                    let x = if diagonal {
+                        Iq::new(q.copysign(c.re), q.copysign(c.im))
+                    } else if c.re.abs() >= c.im.abs() {
+                        Iq::new(1f32.copysign(c.re), 0.0)
+                    } else {
+                        Iq::new(0.0, 1f32.copysign(c.im))
+                    };
+                    self.next_h[i] = z * x.conj();
+                }
+                std::mem::swap(&mut self.hest, &mut self.next_h);
+                if self.sound_at.contains(&l) {
+                    self.push_sound_row(l);
+                }
+            }
             std::mem::swap(&mut self.cur, &mut self.prev);
         }
         // The residual offset: the mean turn per symbol.
@@ -571,11 +720,15 @@ impl Demod {
         };
         if found {
             self.frames += 1;
+            if self.sounding {
+                self.finish_sound(step as f64);
+            }
             on_frame(&Frame {
                 soft: &self.soft,
                 last_diff: &self.diff,
                 stats,
                 scope: self.scopes_on.then_some(&self.scope),
+                sound: if self.sounding { &self.sound } else { &[] },
             });
             // Steer half the residual: the samples already buffered keep the
             // old correction, which the per-symbol turn absorbs.

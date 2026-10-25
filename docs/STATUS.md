@@ -55,6 +55,18 @@ is error free from 10.5 dB of the receiver's MER (first lost AUs at
 11D sits at 11.6 dB: a margin of about 1 dB on this aerial. Other rates are
 estimated (card.rs).
 
+**Channel sounder** (2026-10-25), DecDVB-T's channel panel: a fading
+waterfall (gain at every other carrier, a row a frame), the delay–Doppler
+map and the Doppler spectrum by carrier. DAB has no pilots, so the channel
+is estimated decision-directed: from each frame's phase reference, each
+symbol's cells decided coherently against the last estimate smoothed over
+five carriers, on the constellation that symbol uses (axes and diagonals
+alternate); rows every 12 ms (Doppler ±37.5 Hz), delays from the first path,
+the sample clock's drift taken out. On 11D: D1's SFN paths at 0 and 33 µs,
+a faint one near 130 µs, all static. Deciding every symbol on the diagonals
+had made frame-rate lines at ±10.4 Hz (`--example sound_probe` showed the
+13–17° jumps at each frame's start).
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the

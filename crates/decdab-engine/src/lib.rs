@@ -8,8 +8,10 @@
 //! - [`waterfall`]: the waterfall's thread: its FFTs, and its rows let out
 //!   at an even pace.
 //! - [`meter`]: CPU meters, whole-process and per stage.
+//! - [`delay_doppler`]: the sounder's maps (from DecDVB-T, after DecDRM).
 //! - [`frontend`]: DC and I/Q corrections to the radio's samples.
 
+pub mod delay_doppler;
 pub mod frontend;
 pub mod meter;
 pub mod rx;

@@ -13,6 +13,7 @@
 
 mod band;
 mod card;
+mod channel_view;
 mod freq_display;
 mod mux_map;
 mod prefs;
@@ -81,6 +82,8 @@ struct Options {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Bottom {
     Scopes,
+    /// The channel sounder: fading, delay–Doppler, Doppler by carrier.
+    Channel,
     Hidden,
 }
 
@@ -88,6 +91,7 @@ impl Bottom {
     fn name(self) -> &'static str {
         match self {
             Bottom::Scopes => "scopes",
+            Bottom::Channel => "channel",
             Bottom::Hidden => "none",
         }
     }
@@ -95,6 +99,7 @@ impl Bottom {
     fn parse(s: &str) -> Option<Bottom> {
         Some(match s {
             "scopes" => Bottom::Scopes,
+            "channel" => Bottom::Channel,
             "none" => Bottom::Hidden,
             _ => return None,
         })
@@ -149,9 +154,9 @@ impl Options {
                     o.record_secs = value("seconds")?.parse().map_err(|_| "bad --record-secs")?
                 }
                 "--bottom" => {
-                    let v = value("scopes or none")?;
+                    let v = value("scopes, channel or none")?;
                     o.bottom =
-                        Bottom::parse(&v).ok_or(format!("--bottom: not scopes or none: {v}"))?;
+                        Bottom::parse(&v).ok_or(format!("--bottom: not scopes, channel or none: {v}"))?;
                     o.bottom_given = true;
                 }
                 "--window" => o.window = Some(value("sdr")?),
@@ -294,6 +299,9 @@ struct App {
     bottom: Bottom,
     scope: scopes::ScopeView,
     scopes_sent: bool,
+    /// The channel panel, and whether the engine was last told to sound.
+    chan_view: channel_view::ChannelView,
+    sounder_sent: bool,
     started: Instant,
     shot_sent: bool,
     cpu_mark: Option<(f64, Instant)>,
@@ -419,6 +427,8 @@ impl App {
             bottom: opts.bottom,
             scope: scopes::ScopeView::default(),
             scopes_sent: false,
+            chan_view: channel_view::ChannelView::default(),
+            sounder_sent: false,
             stats: Stats::default(),
             stats_at: Instant::now(),
             cpu: CpuGauge::default(),
@@ -558,6 +568,7 @@ impl App {
                 self.reset_view();
                 self.note.clear();
                 (self.scopes_sent, self.sdr_sent, self.fps_sent) = (false, None, None);
+                self.sounder_sent = false;
                 self.rows_due.clear();
                 self.optimiser = None;
             }
@@ -593,6 +604,7 @@ impl App {
         self.smooth.clear();
         self.span_hz = 0.0;
         self.scope.reset();
+        self.chan_view.reset();
     }
 
     /// A different ensemble (or none): its services, label and picture go.
@@ -637,6 +649,19 @@ impl App {
             s.rx.send(Command::Select(self.want_play));
             self.play_sent = Some(self.want_play);
             self.slide_tex = None;
+        }
+    }
+
+    /// The sounder runs only while its panel shows.
+    fn sync_sounder(&mut self) {
+        let Some(s) = &self.session else { return };
+        let want = self.bottom == Bottom::Channel && self.decode;
+        if want != self.sounder_sent {
+            s.rx.send(Command::Sounder(want));
+            self.sounder_sent = want;
+            if !want {
+                self.chan_view.reset();
+            }
         }
     }
 
@@ -890,7 +915,10 @@ impl App {
         let new_stats =
             (self.stats_at.elapsed() >= Duration::from_millis(250)).then(|| s.rx.stats());
         if self.decode {
-            let u = s.rx.take_dab();
+            let mut u = s.rx.take_dab();
+            if self.bottom == Bottom::Channel {
+                self.chan_view.update(&mut u);
+            }
             self.dab = u.status;
             if let Some(e) = u.ensemble {
                 self.ensemble = e;
@@ -1220,7 +1248,22 @@ impl App {
             ui.checkbox(&mut self.decode, "decode");
             ui.label("panel");
             ui.selectable_value(&mut self.bottom, Bottom::Scopes, "scopes");
+            ui.selectable_value(&mut self.bottom, Bottom::Channel, "channel");
             ui.selectable_value(&mut self.bottom, Bottom::Hidden, "none");
+            if self.bottom == Bottom::Channel {
+                egui::ComboBox::from_id_salt("doppler")
+                    .selected_text(format!("±{} Hz", self.chan_view.doppler_view))
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for d in channel_view::DOPPLER_VIEWS {
+                            ui.selectable_value(
+                                &mut self.chan_view.doppler_view,
+                                d,
+                                format!("±{d} Hz"),
+                            );
+                        }
+                    });
+            }
             ui.separator();
             ui.label("display");
             egui::ComboBox::from_id_salt("fps")
@@ -1416,6 +1459,7 @@ impl eframe::App for App {
         self.sync_decoder();
         self.sync_play();
         self.sync_scopes();
+        self.sync_sounder();
         self.sync_sdr();
         self.sync_fps();
         self.optimise_tick();
@@ -1461,6 +1505,20 @@ impl eframe::App for App {
                         .and_then(|sid| self.ensemble.services.get(&sid))
                         .map(|s| s.name());
                     self.scope.show(ui, header, playing.as_deref());
+                });
+        }
+        if self.bottom == Bottom::Channel {
+            let status = (self.decode && self.dab.locked).then(|| {
+                format!(
+                    "decision-directed from the DQPSK, a row every 12 ms · MER {:.1} dB · carrier {:+.1} Hz",
+                    self.dab.mer_db, self.dab.cfo_hz
+                )
+            });
+            egui::Panel::bottom("channel")
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.set_min_height(SCOPES_PANEL_H + 20.0);
+                    self.chan_view.show(ui, status);
                 });
         }
         egui::Panel::right("services")

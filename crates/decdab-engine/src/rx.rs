@@ -22,8 +22,12 @@ use decdab_data::pad::{DynamicLabel, PadEvent};
 use decdab_fic::{Ensemble, FicDecoder};
 use decdab_io::{IqFileWriter, IqSource};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
-use decdab_ofdm::{Demod, Frontend, Scope};
+use decdab_ofdm::{Demod, Frontend, SOUND_ROW_S, SOUND_SPACING_HZ, Scope};
 
+/// The guard interval, µs (504 samples at 2.048 MHz).
+const GUARD_US: f64 = 246.09375;
+
+use crate::delay_doppler::{ChannelHistory, DelayDoppler, FreqDoppler};
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
 use crate::meter::{Stage, StageLoad, StageMeter};
 use crate::service::{ServiceDecoder, ServiceStats};
@@ -102,6 +106,9 @@ pub enum Command {
     Select(Option<u32>),
     /// Make the scopes' view of each frame while on.
     Scopes(bool),
+    /// Sound the channel (fading rows, the delay-Doppler and the
+    /// frequency-Doppler maps) while on.
+    Sounder(bool),
     /// The display's frame rate: the waterfall makes one row a frame, so it
     /// scrolls a row a frame; the receiver's results are handed over as
     /// often (between 10 and 30 times a second).
@@ -154,6 +161,11 @@ pub struct DabUpdate {
     pub ensemble: Option<Arc<Ensemble>>,
     /// The scopes' view of the newest frame, if one has come.
     pub scope: Option<Arc<Scope>>,
+    /// The sounder's fading rows since the last call (the channel's gain,
+    /// dB, at every other carrier, one a frame) and its maps, when new.
+    pub fading: Vec<Vec<f32>>,
+    pub map: Option<Arc<DelayDoppler>>,
+    pub freq_map: Option<Arc<FreqDoppler>>,
 }
 
 #[derive(Default)]
@@ -161,6 +173,9 @@ struct DabOut {
     status: DabStatus,
     ensemble: Option<Arc<Ensemble>>,
     scope: Option<Arc<Scope>>,
+    fading: Vec<Vec<f32>>,
+    map: Option<Arc<DelayDoppler>>,
+    freq_map: Option<Arc<FreqDoppler>>,
 }
 
 struct Shared {
@@ -231,6 +246,9 @@ impl Rx {
             status: o.status.clone(),
             ensemble: o.ensemble.take(),
             scope: o.scope.take(),
+            fading: std::mem::take(&mut o.fading),
+            map: o.map.take(),
+            freq_map: o.freq_map.take(),
         }
     }
 
@@ -338,10 +356,18 @@ fn run(
     let mut frames: Vec<Vec<i8>> = Vec::new();
     let mut frame_stats = None;
     let mut new_scope: Option<Arc<Scope>> = None;
+    // The sounder: its rows of the last seconds, the fading rows waiting,
+    // and when the maps were last made (once a second: they cost FFTs).
+    let mut sounder: Option<ChannelHistory> = None;
+    let mut fading: Vec<Vec<f32>> = Vec::new();
+    let mut maps_at = Instant::now();
     let set_error = |e: String| sh.stats.lock().unwrap().error = Some(e);
-    let new_rx = |vfo: f64, centre: f64, scopes: bool| match Receiver_::new(vfo, centre, rate) {
+    let new_rx = |vfo: f64, centre: f64, scopes: bool, sound: bool| match Receiver_::new(
+        vfo, centre, rate,
+    ) {
         Ok(mut r) => {
             r.demod.set_scopes(scopes);
+            r.demod.set_sounding(sound);
             Ok(r)
         }
         Err(e) => Err(e),
@@ -353,7 +379,7 @@ fn run(
                 Ok(Command::Decode(vfo)) => {
                     rx = None;
                     if let Some(v) = vfo {
-                        match new_rx(v, source.center_freq(), scopes_on) {
+                        match new_rx(v, source.center_freq(), scopes_on, sounder.is_some()) {
                             Ok(r) => rx = Some(r),
                             Err(e) => set_error(e),
                         }
@@ -376,6 +402,15 @@ fn run(
                         r.demod.set_scopes(on);
                     }
                 }
+                Ok(Command::Sounder(on)) => {
+                    sounder = on.then(|| {
+                        ChannelHistory::new(SOUND_SPACING_HZ, SOUND_ROW_S, GUARD_US)
+                    });
+                    fading.clear();
+                    if let Some(r) = &mut rx {
+                        r.demod.set_sounding(on);
+                    }
+                }
                 Ok(Command::FrontEnd(f)) => front.settings = f,
                 Ok(Command::DisplayFps(fps)) => {
                     let fps = fps.clamp(1.0, 120.0);
@@ -394,7 +429,10 @@ fn run(
                         sh.rows.lock().unwrap().clear();
                         wf.clear();
                         if rx.is_some() {
-                            rx = new_rx(hz, hz, scopes_on).ok();
+                            rx = new_rx(hz, hz, scopes_on, sounder.is_some()).ok();
+                            if let Some(h) = &mut sounder {
+                                h.clear();
+                            }
                             want_service = None;
                             *sh.dab.lock().unwrap() = DabOut::default();
                         }
@@ -478,6 +516,20 @@ fn run(
                     frame_stats = Some(f.stats);
                     if let Some(s) = f.scope {
                         new_scope = Some(Arc::new(s.clone()));
+                    }
+                    if let Some(h) = &mut sounder
+                        && !f.sound.is_empty()
+                    {
+                        // The frame's gain at each sample, its rows averaged.
+                        let mut g = vec![0f32; f.sound[0].len()];
+                        for row in f.sound {
+                            h.push(row);
+                            for (a, z) in g.iter_mut().zip(row) {
+                                *a += z.norm_sqr();
+                            }
+                        }
+                        let n = f.sound.len() as f32;
+                        fading.push(g.iter().map(|p| 10.0 * (p / n).max(1e-12).log10()).collect());
                     }
                 });
             });
@@ -576,6 +628,26 @@ fn run(
                 }
                 if let Some(s) = new_scope.take() {
                     o.scope = Some(s);
+                }
+                if !fading.is_empty() {
+                    o.fading.append(&mut fading);
+                    // A GUI that stops collecting does not make this grow.
+                    let extra = o.fading.len().saturating_sub(300);
+                    o.fading.drain(..extra);
+                }
+                if let Some(h) = &mut sounder
+                    && maps_at.elapsed() >= Duration::from_secs(1)
+                {
+                    maps_at = Instant::now();
+                    let (m, fm) = meter.time(Stage::Ofdm, || {
+                        (h.map().cloned(), h.freq_map().cloned())
+                    });
+                    if let Some(m) = m {
+                        o.map = Some(Arc::new(m));
+                    }
+                    if let Some(m) = fm {
+                        o.freq_map = Some(Arc::new(m));
+                    }
                 }
             }
         }
