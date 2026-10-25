@@ -10,3 +10,4 @@
 *.ts
 /captures
 *.wav
+__pycache__/
