@@ -81,7 +81,12 @@ list, beside the playing service and in the slideshow's place, and a Guide
 panel. On 12B: 2301 packets, none bad, 97 data groups, 10 logos (BBC
 `siC22401.png`-style names, 32×32 to 320×240) in 60 s; the MOT directory
 lists 85 objects, 539 kB, a carousel of about 270 s, so the schedule files
-(`w20261025dC224c0.EHB`) have not been captured yet.
+(`w20261025dC224c0.EHB`) come later. A 330 s recording got the whole
+carousel: 12,902 packets, none bad; 15 schedules (Radio 4: 50 programmes,
+the clock change on 25 October carried in the times) and the SI file. Its
+service ids are binary DAB content ids (`40 e1 ce15 c221`), which DRM's
+table had read as text; they now decode as `e1.ce15.c221.0`. The Guide panel
+marked The Archers Omnibus on now, as the station's DLS said.
 
 **SFN: TII** (2026-10-25). `tii.rs`: the null symbol's carriers averaged
 (~2 s), each comb's eight groups against the noise, a transmitter where four
@@ -100,8 +105,8 @@ the comb × group grid.
   commercial ensembles send no 0/13 at all).
 - Ensemble label shows the EId until FIG 1/0 arrives (the CLI picks the
   service after 10 frames).
-- Packet mode carries SPI only so far (Journaline, TPEG not wired); the
-  schedules want a capture longer than the 270 s carousel; packet FEC
+- Packet mode carries SPI only so far (Journaline, TPEG not wired); a
+  schedule takes up to one carousel (about 270 s on 12B) to arrive; packet FEC
   parity is skipped, not used. No modulator yet; the X-PAD slideshow has
   not been seen on air.
 - TII names no transmitters (no database); a weak TII (the 130 µs path)

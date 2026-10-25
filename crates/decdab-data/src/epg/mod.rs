@@ -140,7 +140,7 @@ impl EpgValue {
                 let v = tenths.checked_add(frac.chars().next()?.to_digit(10)?)?;
                 Self::Bitrate(u16::try_from(v).ok()?)
             }
-            AttrKind::Unused => return None,
+            AttrKind::Unused | AttrKind::ContentId => return None,
         })
     }
 }
@@ -450,6 +450,7 @@ fn decode_value(attr: &AttrDef, v: &[u8], ctx: &Ctx) -> EpgValue {
             [a, b] => EpgValue::Bitrate(u16::from_be_bytes([*a, *b])),
             _ => raw(),
         },
+        AttrKind::ContentId => content_id_text(v).map_or_else(raw, EpgValue::Text),
         AttrKind::Genre | AttrKind::Unused => raw(),
     }
 }
@@ -497,6 +498,66 @@ fn string_bytes(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// A DAB content identifier (TS 102 371) in TS 102 818's dotted form:
+/// "e1.ce15" for an ensemble (ECC, EId: three bytes), "e1.ce15.c221.0" for
+/// a service (a flags byte, 0x40 when ECC and EId follow, then the SId, 16
+/// or 32 bits, and an SCIdS byte if one is sent). Seen on the BBC's SPI:
+/// `e1 ce15` and `40 e1 ce15 c221`.
+fn content_id_text(v: &[u8]) -> Option<String> {
+    if v.len() == 3 {
+        return Some(format!("{:02x}.{:02x}{:02x}", v[0], v[1], v[2]));
+    }
+    let (&flags, mut rest) = v.split_first()?;
+    let mut parts = Vec::new();
+    if flags & 0x40 != 0 {
+        let (e, r) = rest.split_at_checked(3)?;
+        parts.push(format!("{:02x}.{:02x}{:02x}", e[0], e[1], e[2]));
+        rest = r;
+    }
+    let (sid, scids) = match rest.len() {
+        2 | 3 => rest.split_at(2),
+        4 | 5 => rest.split_at(4),
+        _ => return None,
+    };
+    parts.push(sid.iter().map(|b| format!("{b:02x}")).collect());
+    parts.push(scids.first().map_or(0, |s| s & 0x0F).to_string());
+    Some(parts.join("."))
+}
+
+/// The bytes of a dotted content identifier, the inverse of
+/// [`content_id_text`] (an SCIdS of 0 is not sent).
+fn content_id_bytes(s: &str) -> Option<Vec<u8>> {
+    let hex = |p: &str| -> Option<Vec<u8>> {
+        if !p.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..p.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(p.get(i..i + 2)?, 16).ok())
+            .collect()
+    };
+    let parts: Vec<&str> = s.trim().split('.').collect();
+    match parts.as_slice() {
+        [ecc, eid] => Some([hex(ecc)?, hex(eid)?].concat()).filter(|b| b.len() == 3),
+        [ecc, eid, sid, scids] => {
+            let mut out = vec![0x40];
+            out.extend(hex(ecc)?);
+            out.extend(hex(eid)?);
+            let sid = hex(sid)?;
+            if !matches!(sid.len(), 2 | 4) || out.len() != 4 {
+                return None;
+            }
+            out.extend(sid);
+            let sc: u8 = scids.parse().ok().filter(|n| *n < 16)?;
+            if sc != 0 {
+                out.push(sc);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 fn encode_value(attr: &AttrDef, value: &EpgValue) -> Result<Vec<u8>> {
     let bad = || DataError::EpgValue {
         attribute: attr.name.to_owned(),
@@ -505,6 +566,7 @@ fn encode_value(attr: &AttrDef, value: &EpgValue) -> Result<Vec<u8>> {
     Ok(match (attr.kind, value) {
         (_, EpgValue::Raw(bytes)) => bytes.clone(),
         (AttrKind::String, EpgValue::Text(s)) => string_bytes(s),
+        (AttrKind::ContentId, EpgValue::Text(s)) => content_id_bytes(s).ok_or_else(bad)?,
         (kind, EpgValue::Text(s)) => {
             let typed = EpgValue::parse_for(kind, s).ok_or_else(bad)?;
             return encode_value(attr, &typed);
@@ -628,6 +690,15 @@ pub fn object_name(header: &MotHeader) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dab_content_ids() {
+        assert_eq!(content_id_text(&[0xe1, 0xce, 0x15]).unwrap(), "e1.ce15");
+        let svc = [0x40, 0xe1, 0xce, 0x15, 0xc2, 0x21];
+        assert_eq!(content_id_text(&svc).unwrap(), "e1.ce15.c221.0");
+        assert_eq!(content_id_bytes("e1.ce15.c221.0").unwrap(), svc);
+        assert_eq!(content_id_bytes("e1.ce15").unwrap(), [0xe1, 0xce, 0x15]);
+    }
 
     /// A hand-built schedule, byte by byte, as the TS 102 371 encoder of a broadcaster
     /// would produce it: token table, schedule with a scope and one programme.

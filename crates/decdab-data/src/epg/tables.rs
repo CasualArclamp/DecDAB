@@ -34,6 +34,9 @@ pub(crate) enum AttrKind {
     Genre,
     /// Bitrate in units of 0.1 kbit/s, 16 bits (Dream multiplies instead of dividing).
     Bitrate,
+    /// DAB content identifier (TS 102 371): flags, then ECC and EId, SId
+    /// and SCIdS as the flags say.
+    ContentId,
     /// Reserved slot ("Not used" in Dream).
     Unused,
 }
@@ -289,7 +292,7 @@ pub(crate) const ELEMENTS: &[ElementDef] = &[
     ElementDef {
         tag: 0x26,
         name: "ensemble",
-        attrs: &[a("id", AttrKind::String), a("version", AttrKind::U16)],
+        attrs: &[a("id", AttrKind::ContentId), a("version", AttrKind::U16)],
     },
     ElementDef {
         tag: 0x27,
@@ -313,7 +316,7 @@ pub(crate) const ELEMENTS: &[ElementDef] = &[
         tag: 0x29,
         name: "serviceID",
         attrs: &[
-            a("id", AttrKind::String),
+            a("id", AttrKind::ContentId),
             a("type", AttrKind::Enum(SERVICE_ID_TYPE)),
         ],
     },

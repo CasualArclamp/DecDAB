@@ -313,6 +313,7 @@ fn programme(e: &EpgElement) -> Option<Programme> {
         .filter(|s| !s.is_empty())
         .or_else(|| text("mediumName"))
         .or_else(|| text("shortName"))
+        .map(|n| undated(&n).to_string())
         .unwrap_or_default();
     // TS 102 818 §6.3: location > time (time, duration; the actual ones win).
     let mut start = None;
@@ -341,6 +342,19 @@ fn programme(e: &EpgElement) -> Option<Programme> {
         name,
         description,
     })
+}
+
+/// A name without the date some broadcasters put on the end of every
+/// programme's ("Midnight News - 25/10/2026"): the guide shows the date.
+fn undated(name: &str) -> &str {
+    if let Some((head, tail)) = name.rsplit_once(" - ")
+        && tail.len() == 10
+        && tail.bytes().enumerate().all(|(i, b)| if i == 2 || i == 5 { b == b'/' } else { b.is_ascii_digit() })
+    {
+        head
+    } else {
+        name
+    }
 }
 
 /// Width and height of a PNG (IHDR) or a JPEG (its first SOF marker).
@@ -401,6 +415,12 @@ mod tests {
         assert_eq!(s.logo(0xC224, 100).unwrap().width, 128);
         assert_eq!(s.logo(0xC224, 600).unwrap().width, 320);
         assert!(s.logo(0xC221, 32).is_none());
+    }
+
+    #[test]
+    fn dates_come_off_names() {
+        assert_eq!(undated("Midnight News - 25/10/2026"), "Midnight News");
+        assert_eq!(undated("Take Four Books - John Grisham"), "Take Four Books - John Grisham");
     }
 
     #[test]
