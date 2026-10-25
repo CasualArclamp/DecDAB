@@ -27,7 +27,7 @@ use decdab_ofdm::{Demod, Frontend, Scope};
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
 use crate::meter::{Stage, StageLoad, StageMeter};
 use crate::service::{ServiceDecoder, ServiceStats};
-use crate::spectrum::RowBuilder;
+use crate::waterfall::Waterfall;
 
 /// How the spectrum is built, and where the sound goes.
 #[derive(Debug, Clone, Copy)]
@@ -164,7 +164,8 @@ struct DabOut {
 }
 
 struct Shared {
-    rows: Mutex<VecDeque<Row>>,
+    /// Filled by the waterfall's thread.
+    rows: Arc<Mutex<VecDeque<Row>>>,
     stats: Mutex<Stats>,
     dab: Mutex<DabOut>,
     stop: AtomicBool,
@@ -172,8 +173,6 @@ struct Shared {
 
 /// Signal thrown away after a retune, seconds.
 const SETTLE_S: f64 = 0.05;
-/// Rows kept for a GUI that is slow to collect them.
-const MAX_QUEUED_ROWS: usize = 100;
 
 /// A running receive thread.
 pub struct Rx {
@@ -188,7 +187,7 @@ pub type DropProbe = Box<dyn Fn() -> u64 + Send>;
 impl Rx {
     pub fn start(source: Box<dyn IqSource>, opts: RxOptions, drops: Option<DropProbe>) -> Rx {
         let shared = Arc::new(Shared {
-            rows: Mutex::new(VecDeque::new()),
+            rows: Arc::new(Mutex::new(VecDeque::new())),
             stats: Mutex::new(Stats {
                 describe: source.describe(),
                 sample_rate: source.sample_rate(),
@@ -318,7 +317,8 @@ fn run(
     let rate = source.sample_rate();
     let live = source.is_live();
     let (mut rows_per_s, mut segments) = (opts.rows_per_s, opts.segments_per_row);
-    let mut builder = RowBuilder::new(opts.fft, rate, rows_per_s, segments);
+    // The waterfall's rows are made and paced on a thread of their own.
+    let mut wf = Waterfall::start(opts.fft, rate, rows_per_s, segments, Arc::clone(&sh.rows));
     let mut meter = StageMeter::default();
     let mut block: Vec<Iq> = Vec::new();
     let mut level = Level::default();
@@ -332,7 +332,6 @@ fn run(
     let mut front = FrontEnd::new(FrontEndSettings::default());
     let mut publish_at = Instant::now();
     let mut publish = Duration::from_millis(100);
-    let mut row = Vec::new();
     let started = Instant::now();
     let mut pcm: Vec<Pcm> = Vec::new();
     let mut pad: Vec<PadEvent> = Vec::new();
@@ -385,13 +384,14 @@ fn run(
                         as u32)
                         .max(1);
                     publish = Duration::from_secs_f64((1.0 / fps).clamp(1.0 / 30.0, 0.1));
-                    builder = RowBuilder::new(opts.fft, rate, rows_per_s, segments);
+                    wf.set_rate(rows_per_s, segments);
                 }
                 Ok(Command::Retune(hz)) => match source.retune(hz) {
                     Ok(true) => {
                         tuning += 1;
                         settle = (SETTLE_S * rate) as u64;
                         sh.rows.lock().unwrap().clear();
+                        wf.clear();
                         if rx.is_some() {
                             rx = new_rx(hz, hz, scopes_on).ok();
                             want_service = None;
@@ -463,26 +463,9 @@ fn run(
         }
         meter.time(Stage::FrontEnd, || front.apply(&mut block));
 
-        // The waterfall.
-        let made = meter.time(Stage::Spectrum, || {
-            builder.push(&block);
-            let mut made = Vec::new();
-            while builder.take_row(&mut row).is_some() {
-                made.push(Row {
-                    db: row.clone(),
-                    center_hz: source.center_freq(),
-                    sample_rate: rate,
-                    tuning,
-                });
-            }
-            made
-        });
-        if !made.is_empty() {
-            let mut q = sh.rows.lock().unwrap();
-            q.extend(made);
-            let extra = q.len().saturating_sub(MAX_QUEUED_ROWS);
-            q.drain(..extra);
-        }
+        // The waterfall: the windows its rows need go to its thread.
+        let centre = source.center_freq();
+        meter.time(Stage::Spectrum, || wf.push(&block, centre, tuning));
 
         // The receiver.
         if let Some(r) = &mut rx {

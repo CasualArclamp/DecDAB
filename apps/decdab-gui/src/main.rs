@@ -354,6 +354,12 @@ struct App {
     /// a frame), and the rows come but not yet shown: one goes on the
     /// waterfall each frame, so it scrolls evenly.
     fps_sent: Option<f64>,
+    /// The waterfall's height on the screen, physical pixels: its rows, one
+    /// a pixel, so it moves a pixel a frame and the frame rate is its speed.
+    wf_rows: usize,
+    /// Frames that put 0, 1 and 2 rows on the waterfall (for the screenshot
+    /// report: an even scroll is all 1s).
+    wf_steps: [u32; 3],
     rows_due: std::collections::VecDeque<Row>,
     keeper: Option<remember::Keeper>,
     recorder: Option<recorder::Recorder>,
@@ -436,6 +442,8 @@ impl App {
             optimiser: None,
             opt_result: None,
             fps_sent: None,
+            wf_rows: 0,
+            wf_steps: [0; 3],
             rows_due: std::collections::VecDeque::new(),
             keeper: None,
             recorder: None,
@@ -767,8 +775,14 @@ impl App {
             s.rx.send(Command::DisplayFps(fps));
             self.fps_sent = Some(fps);
         }
-        // Twenty-five seconds of waterfall at any rate.
-        self.history.set_capacity((25.0 * fps) as usize);
+        // Exactly a row a physical pixel of the waterfall's height: a row a
+        // frame then moves it one whole pixel a frame, 60 pixels a second at
+        // 60 fps, 15 at 15 (the time on the screen is the height over the
+        // rate). Any other count would draw rows across fractions of pixels.
+        // A resize or a change of scaling starts the waterfall afresh.
+        if self.wf_rows > 0 && self.history.capacity() != self.wf_rows {
+            self.history.set_capacity(self.wf_rows);
+        }
     }
 
     fn start_optimiser(&mut self) {
@@ -921,6 +935,9 @@ impl App {
         // The trace's smoothing: a time constant of about 0.12 s, whatever
         // the row rate.
         let pull = 1.0 - (-1.0 / (0.12 * self.opts.fps.max(1.0)) as f32).exp();
+        if self.span_hz > 0.0 && self.decoder_sent.is_some() {
+            self.wf_steps[take.min(2)] += 1;
+        }
         for row in self.rows_due.drain(..take).collect::<Vec<_>>() {
             if row.tuning != self.tuning {
                 self.tuning = row.tuning;
@@ -1033,12 +1050,13 @@ impl App {
         let (w, h) = (image.size[0] as u32, image.size[1] as u32);
         match image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
             Ok(()) => eprintln!(
-                "screenshot saved to {} (CPU {:.1} % average; per frame: logic {:.2} ms, ui {:.2} ms, {} frames; {})",
+                "screenshot saved to {} (CPU {:.1} % average; per frame: logic {:.2} ms, ui {:.2} ms, {} frames; waterfall rows a frame 0/1/2: {:?}; {})",
                 path.display(),
                 self.cpu_avg.unwrap_or(self.cpu_percent),
                 self.frame_cost[0].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
                 self.frame_cost[1].as_secs_f64() * 1e3 / self.frames.max(1) as f64,
                 self.frames,
+                self.wf_steps,
                 self.stats.describe
             ),
             Err(e) => eprintln!("cannot save screenshot {}: {e}", path.display()),
@@ -1460,6 +1478,9 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                self.wf_rows =
+                    band::waterfall_rows(ui.available_height(), ui.ctx().pixels_per_point())
+                        .max(64);
                 let tex = self.ring.update(ui.ctx(), &self.history);
                 let inp = band::BandInput {
                     spectrum_db: &self.smooth,

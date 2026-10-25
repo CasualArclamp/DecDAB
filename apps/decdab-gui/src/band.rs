@@ -43,6 +43,16 @@ pub enum Action {
     Play(u32),
 }
 
+/// The waterfall's height in whole physical pixels for a band view `height`
+/// points tall at `ppp` pixels a point: the app keeps exactly this many
+/// rows, and the layout below draws them on exactly this many pixels, so a
+/// row is a pixel and each step of the scroll is one whole pixel (no row
+/// smeared across two, which shimmers as it moves).
+pub fn waterfall_rows(height: f32, ppp: f32) -> usize {
+    let spec_h = (height * 0.36).clamp(110.0, 340.0);
+    ((height - spec_h - AXIS_H - 4.0).max(0.0) * ppp).floor() as usize
+}
+
 pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Option<Action> {
     let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click());
     let rect = resp.rect;
@@ -67,10 +77,12 @@ pub fn show(ui: &mut egui::Ui, inp: &BandInput) -> Option<Action> {
         pos2(plot_l, rect.top() + 4.0),
         pos2(plot_r, rect.top() + spec_h),
     );
-    let wf = Rect::from_min_max(
-        pos2(plot_l, spec.bottom() + AXIS_H),
-        pos2(plot_r, rect.bottom() - 4.0),
-    );
+    // The waterfall on whole physical pixels: its top on a pixel boundary
+    // and its height the rows the app keeps (see `waterfall_rows`).
+    let ppp = ui.ctx().pixels_per_point();
+    let wf_top = ((spec.bottom() + AXIS_H) * ppp).round() / ppp;
+    let wf_px = waterfall_rows(rect.height(), ppp) as f32;
+    let wf = Rect::from_min_max(pos2(plot_l, wf_top), pos2(plot_r, wf_top + wf_px / ppp));
     let lo_hz = inp.center_hz - inp.span_hz / 2.0;
     let x_of = |hz: f64| plot_l + ((hz - lo_hz) / inp.span_hz) as f32 * (plot_r - plot_l);
     let hz_of = |x: f32| lo_hz + ((x - plot_l) / (plot_r - plot_l)) as f64 * inp.span_hz;
