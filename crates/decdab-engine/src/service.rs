@@ -23,6 +23,10 @@ pub struct ServiceStats {
     pub au_bad: u64,
     /// Audio frames the codec concealed.
     pub concealed: u64,
+    /// MP2 with concealment on: frames whose header CRC failed, and
+    /// groups of scale factors whose ScF-CRC failed.
+    pub mp2_hdr_crc: u64,
+    pub mp2_scf_crc: u64,
     /// "HE-AAC v2 · 48 kHz", "MPEG-1 Layer II · 48 kHz".
     pub codec: String,
     pub synced: bool,
@@ -66,6 +70,14 @@ impl ServiceDecoder {
             pad: PadDecoder::new(),
             stats: ServiceStats::default(),
         })
+    }
+
+    /// Error concealment for an MP2 service (a no-op for DAB+): see
+    /// [`Mp2Decoder::set_conceal`].
+    pub fn set_mp2_conceal(&mut self, on: bool) {
+        if let Audio::Mp2(m) = &mut self.audio {
+            m.set_conceal(on);
+        }
     }
 
     pub fn subchannel(&self) -> &SubChannel {
@@ -147,6 +159,7 @@ impl ServiceDecoder {
                                 );
                             }
                             st.au_ok += 1;
+                            st.concealed += p.concealed as u64;
                             pcm.push(p);
                         }
                         Err(e) => {
@@ -156,6 +169,8 @@ impl ServiceDecoder {
                         }
                     }
                 }
+                st.mp2_hdr_crc = m.hdr_crc_fail;
+                st.mp2_scf_crc = m.scf_crc_fail;
                 st.synced = st.au_ok > 0;
             }
         }

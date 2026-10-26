@@ -117,6 +117,11 @@ pub enum Command {
     DisplayFps(f64),
     /// Look for the transmitters' identification (TII) while on.
     Tii(bool),
+    /// Error concealment in the Layer II (MP2) decoder, now and for every
+    /// MP2 service played after: replaces damaged scale factors and fills
+    /// frames with a failed header CRC (see `Mp2Decoder::set_conceal`).
+    /// Off at first.
+    Mp2Conceal(bool),
     FrontEnd(FrontEndSettings),
     /// Start recording to this file (cs8), or stop with `None`.
     Record(Option<PathBuf>),
@@ -370,6 +375,7 @@ fn run(
     let mut want_service: Option<u32> = None;
     let mut scopes_on = false;
     let mut tii_on = false;
+    let mut mp2_conceal = false;
     let mut new_tii: Option<Arc<TiiReport>> = None;
     let mut settle = 0u64;
     let mut front = FrontEnd::new(FrontEndSettings::default());
@@ -426,6 +432,14 @@ fn run(
                     tii_on = on;
                     if let Some(r) = &mut rx {
                         r.demod.set_tii(on);
+                    }
+                }
+                Ok(Command::Mp2Conceal(on)) => {
+                    mp2_conceal = on;
+                    if let Some(r) = &mut rx
+                        && let Some((_, d)) = &mut r.service
+                    {
+                        d.set_mp2_conceal(on);
                     }
                 }
                 Ok(Command::Scopes(on)) => {
@@ -606,8 +620,9 @@ fn run(
                     if let Some(svc) = e.services.get(&sid)
                         && let Some(comp) = svc.primary()
                         && let Some(sc) = e.subchannel_of(comp)
-                        && let Some(d) = ServiceDecoder::new(comp, *sc)
+                        && let Some(mut d) = ServiceDecoder::new(comp, *sc)
                     {
+                        d.set_mp2_conceal(mp2_conceal);
                         r.demod.set_scope_subchannel(Some((sc.start, sc.size)));
                         r.service = Some((sid, d));
                         if opts.sound {

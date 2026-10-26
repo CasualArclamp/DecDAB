@@ -54,7 +54,7 @@ core for a whole receiver with audio:
 | `decdab-fec` | Rate-1/4 K = 7 code, puncturing (FIC, EEP-A/B, UEP Table 31), block Viterbi, energy dispersal, time interleaving, RS(120,110). |
 | `decdab-fic` | FIB decoding and the FIG parser → `Ensemble` (services, components, sub-channels, labels, PTy, user apps, time). |
 | `decdab-msc` | A sub-channel's CIFs → logical frames; DAB+ superframes (Fire code, RS, AUs, PAD). |
-| `decdab-codecs` | `AacDecoder` (FDK-AAC, raw AUs with an ASC from the superframe header), `Mp2Decoder`. |
+| `decdab-codecs` | `AacDecoder` (FDK-AAC, raw AUs with an ASC from the superframe header), `Mp2Decoder` (with an optional header-CRC / ScF-CRC check and concealment, off by default). |
 | `decdab-fdk-sys` | FDK-AAC build and FFI (from DecDRM). |
 | `apps/decdab-cli` | `blocks`, `scan`, `capture`, `info`, `decode`. |
 

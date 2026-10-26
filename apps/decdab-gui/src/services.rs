@@ -129,7 +129,15 @@ pub struct NowPlaying<'a> {
     pub audio: Option<&'a AudioHandle>,
 }
 
-pub fn now_playing(ui: &mut Ui, np: &NowPlaying, volume: &mut f32) -> Option<Action> {
+/// What the playing service's panel lets the user change.
+pub struct PlayingControls<'a> {
+    pub volume: &'a mut f32,
+    /// MP2 error concealment (shown for MP2 services only).
+    pub mp2_conceal: &'a mut bool,
+}
+
+pub fn now_playing(ui: &mut Ui, np: &NowPlaying, ctl: PlayingControls) -> Option<Action> {
+    let PlayingControls { volume, mp2_conceal } = ctl;
     let mut action = None;
     ui.horizontal(|ui| {
         if let Some(t) = &np.logo {
@@ -199,7 +207,24 @@ pub fn now_playing(ui: &mut Ui, np: &NowPlaying, volume: &mut f32) -> Option<Act
         if s.concealed > 0 {
             bits.push(format!("{} concealed", s.concealed));
         }
+        if s.mp2_hdr_crc + s.mp2_scf_crc > 0 {
+            bits.push(format!(
+                "CRC failed: {} headers · {} scale factor groups",
+                s.mp2_hdr_crc, s.mp2_scf_crc
+            ));
+        }
         ui.label(RichText::new(bits.join(" · ")).size(11.0).weak());
+        if s.codec.starts_with("MPEG") {
+            ui.checkbox(mp2_conceal, "repair MP2 errors").on_hover_text(
+                "Fixes the \"boiling\" (loud splats and pumping in single \
+                 sub-bands) that damaged MP2 frames make on a weak signal. \
+                 Scale factors that fail their CRC are replaced with the \
+                 previous frame's, and a frame whose header fails its CRC \
+                 is filled from the last good one. Frames that pass are \
+                 played untouched. Errors in the sample bits cannot be \
+                 detected, so they are left as they are.",
+            );
+        }
         if !s.synced && s.frames > 20 {
             ui.label(RichText::new("audio not in sync yet").color(Color32::from_rgb(255, 176, 40)));
         }
