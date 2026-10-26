@@ -117,6 +117,35 @@ matched to a service are saved to `%APPDATA%\DecDAB\logos` (`C1C0_128x128.png`)
 and drawn from there until the air brings them: after the 12C run, 11D showed
 Absolute Radio's and Heart 70s/80s's logos without any SPI of its own.
 
+**MP2 error concealment** (2026-10-26), a switch, off by default. The
+plain MP2 services (Virgin Radio, Premier, Fix Radio; UEP 3) protect the
+scale factors only medium and the sample bits least, and a damaged scale
+factor makes a sub-band "boil" (loud splats, pumping). `Mp2Decoder::set_conceal`
+turns on two checks the decoder never made: the header CRC-16 (EN 300 401
+Annex B.2; covers the header's second half, bit allocation and SCFSI) and the
+ScF-CRC (Annex B.3: a CRC-8 per group of sub-bands 0–3, 4–7, 8–15, 16–, over
+the 3 MSBs of their scale factors, sent in the *previous* frame's tail in
+reverse group order). Only a detected failure is acted on: a bad header CRC
+repeats the last good frame's sub-band samples, fading out across the frame
+(silence if several in a row), through the synthesis filter, and fades the
+next good frame in over 4 ms (before any good frame it is an error: no rate to
+trust); a bad ScF-CRC group gets the previous frame's scale factors for its
+allocated sub-bands (zero if it had none before). Sample-bit errors are
+undetectable and left alone, and a frame that passes is decoded bit for bit as
+with the switch off (tested; so is switch-off against the pre-change decoder,
+by hash). After lost sync (`push` skipped bytes) the next frame's ScF-CRC is
+not believed. Counters on the decoder (`hdr_crc_fail`, `scf_crc_fail`,
+`concealed`) feed `ServiceStats` and the GUI's service panel; the GUI has a
+"repair MP2 errors" checkbox (pref `mp2_conceal`, sent as
+`Command::Mp2Conceal`, live) and `decdab decode` a `--mp2-conceal` flag. CPU:
+unchanged within noise (about 0.13 % of a core for a 24 s-a-second stream,
+off or on). **Verified** on 812 real frames of Virgin Radio (mono, 27-band, 48
+kHz, 80 kbit/s) for both CRCs, and on the two-frame vector in the tests;
+**not** checked on air: stereo and joint stereo (scale-factor order for the CRC
+follows the bitstream order), the two-CRC 8/12-band case (groups 0–3 and 4–7,
+from Annex B.3), MPEG-2 LSF, and the sound of the concealment on a real weak
+signal (no captures with errors were at hand).
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the
@@ -131,4 +160,4 @@ Absolute Radio's and Heart 70s/80s's logos without any SPI of its own.
 - TII names no transmitters (no database); a weak TII (the 130 µs path)
   is not identified.
 - The GUI has no band scan window or history panel.
-- MP2's ScF-CRC is not checked; a damaged frame plays as it is.
+- MP2's header and ScF CRCs are checked only with the "repair MP2 errors" switch on (off by default); the 3 LSBs of a scale factor and the sample bits are unprotected, so damage there still plays as it is.

@@ -40,6 +40,12 @@ pub struct DecodeArgs {
     /// Folder for the slideshow's images (and other MOT objects).
     #[arg(long)]
     pub slides: Option<PathBuf>,
+    /// MP2 services: check the header and scale-factor CRCs and conceal
+    /// what fails (damaged scale factors are replaced with the previous
+    /// frame's; a frame with a bad header is filled from the last good one).
+    /// Frames that pass are decoded exactly as without it.
+    #[arg(long)]
+    pub mp2_conceal: bool,
     #[command(flatten)]
     pub gains: Gains,
 }
@@ -224,7 +230,9 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                         aac: None,
                     }
                 } else {
-                    Audio::Mp2(Box::new(Mp2Decoder::new()))
+                    let mut m = Mp2Decoder::new();
+                    m.set_conceal(a.mp2_conceal);
+                    Audio::Mp2(Box::new(m))
                 };
                 eprintln!(
                     "{}: {} — sub-channel {}, {} kbit/s, {}, {}",
@@ -429,7 +437,16 @@ pub fn run(a: DecodeArgs) -> Result<()> {
                     s.superframes, s.rs_corrected, s.rs_failed, s.au_ok, s.au_bad
                 );
             }
-            Audio::Mp2(m) => println!(", {} MP2 frames, {} bad", m.frames, m.bad),
+            Audio::Mp2(m) => {
+                print!(", {} MP2 frames, {} bad", m.frames, m.bad);
+                if m.conceal() {
+                    print!(
+                        "; concealment on: {} header CRC failures, {} scale-factor group CRC failures, {} frames concealed",
+                        m.hdr_crc_fail, m.scf_crc_fail, m.concealed
+                    );
+                }
+                println!();
+            }
         }
     }
     println!(

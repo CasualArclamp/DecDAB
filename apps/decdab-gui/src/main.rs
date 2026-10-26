@@ -366,6 +366,10 @@ struct App {
     logos: logos::Logos,
     guide: guide::GuideView,
     volume: f32,
+    /// MP2 error concealment: the user's choice (kept in the prefs) and
+    /// whether the engine has been told it.
+    mp2_conceal: bool,
+    conceal_sent: bool,
 
     tune_hz: f64,
     dial_hz: f64,
@@ -464,6 +468,8 @@ impl App {
             logos: logos::Logos::default(),
             guide: guide::GuideView::default(),
             volume,
+            mp2_conceal: prefs::get("mp2_conceal").is_some_and(|v| v == "1"),
+            conceal_sent: false,
             tune_hz,
             dial_hz: tune_hz,
             dial_edit: None,
@@ -591,6 +597,7 @@ impl App {
                 (self.scopes_sent, self.sdr_sent, self.fps_sent) = (false, None, None);
                 self.sounder_sent = false;
                 self.tii_sent = false;
+                self.conceal_sent = false;
                 self.rows_due.clear();
                 self.optimiser = None;
             }
@@ -673,6 +680,15 @@ impl App {
             s.rx.send(Command::Select(self.want_play));
             self.play_sent = Some(self.want_play);
             self.slide_tex = None;
+        }
+    }
+
+    /// The MP2 decoder's error concealment follows the checkbox.
+    fn sync_conceal(&mut self) {
+        let Some(s) = &self.session else { return };
+        if self.mp2_conceal != self.conceal_sent {
+            s.rx.send(Command::Mp2Conceal(self.mp2_conceal));
+            self.conceal_sent = self.mp2_conceal;
         }
     }
 
@@ -1434,10 +1450,20 @@ impl App {
                 slide_name: self.dab.slide.as_ref().map(|s| s.name.as_str()),
                 audio: self.dab.audio.as_ref(),
             };
-            let before = self.volume;
-            action = services::now_playing(ui, &np, &mut self.volume);
+            let (before, conceal_before) = (self.volume, self.mp2_conceal);
+            action = services::now_playing(
+                ui,
+                &np,
+                services::PlayingControls {
+                    volume: &mut self.volume,
+                    mp2_conceal: &mut self.mp2_conceal,
+                },
+            );
             if self.volume != before {
                 prefs::set_volume(self.volume);
+            }
+            if self.mp2_conceal != conceal_before {
+                prefs::set("mp2_conceal", if self.mp2_conceal { "1" } else { "0" });
             }
         }
         ui.add_space(10.0);
@@ -1505,6 +1531,7 @@ impl eframe::App for App {
         self.take_rows(ctx);
         self.sync_decoder();
         self.sync_play();
+        self.sync_conceal();
         self.sync_scopes();
         self.sync_sounder();
         self.sync_tii();

@@ -17,6 +17,7 @@ cargo run --release -p decdab-cli -- capture 12B --amp --seconds 10   # captures
 cargo run --release -p decdab-cli -- info captures/12b_225.648MHz_4.096Msps_amp.cs8   # ensemble, services, sub-channels
 cargo run --release -p decdab-cli -- info 11D --amp                   # the same, live
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Classic FM" -o out/x.wav   # a service to WAV, CPU per stage
+cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Virgin Radio" -o out/x.wav --mp2-conceal   # MP2: check the header and scale-factor CRCs, conceal what fails (the GUI has a checkbox in the service panel)
 cargo run --release -p decdab-gui                                     # the GUI
 cargo run --release -p decdab-gui -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --play "Classic FM" --screenshot out/x.png --after 10
 cargo run --release -p decdab-gui -- --block 11D --play Absolute       # live (needs the HackRF free)
