@@ -174,7 +174,7 @@ pub fn read_version() -> UsbCommand {
         request: request::VERSION_STRING_READ,
         value: 0,
         index: 0,
-        data: CommandData::In(255),
+        data: CommandData::In(127),
     }
 }
 
@@ -225,8 +225,10 @@ pub fn parse_sample_rates(reply: &[u8], count: u32) -> Result<Vec<u32>> {
         ));
     }
     Ok(reply[..want]
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect())
 }
 

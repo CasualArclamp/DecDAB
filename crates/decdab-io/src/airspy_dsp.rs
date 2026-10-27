@@ -234,7 +234,7 @@ impl Halfband {
         for ((e, o), pair) in self.even[..half]
             .iter_mut()
             .zip(&mut self.odd[..half])
-            .zip(x.chunks_exact(2))
+            .zip(x.as_chunks::<2>().0)
         {
             *e = pair[0];
             *o = pair[1];
@@ -348,9 +348,11 @@ impl PolyResampler {
 fn dot2(row: &[f32], xi: &[f32], xq: &[f32]) -> (f32, f32) {
     let (mut ai, mut aq) = ([0f32; 4], [0f32; 4]);
     for ((c, i), q) in row
-        .chunks_exact(4)
-        .zip(xi.chunks_exact(4))
-        .zip(xq.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(xi.as_chunks::<4>().0)
+        .zip(xq.as_chunks::<4>().0)
     {
         for l in 0..4 {
             ai[l] += c[l] * i[l];
@@ -558,9 +560,11 @@ fn load_unpacked(bytes: &[u8], dc: f32, e: &mut [f32], o: &mut [f32]) -> u32 {
     let (neg, pos) = (-ADC_SCALE, ADC_SCALE);
     let mut sum = 0u32;
     for ((b, e), o) in bytes
-        .chunks_exact(8)
-        .zip(e.chunks_exact_mut(2))
-        .zip(o.chunks_exact_mut(2))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(e.as_chunks_mut::<2>().0)
+        .zip(o.as_chunks_mut::<2>().0)
     {
         let r = [
             u16::from_le_bytes([b[0], b[1]]),
@@ -582,11 +586,13 @@ fn load_packed(bytes: &[u8], dc: f32, e: &mut [f32], o: &mut [f32]) -> u32 {
     let (neg, pos) = (-ADC_SCALE, ADC_SCALE);
     let mut sum = 0u32;
     for ((g, e), o) in bytes
-        .chunks_exact(12)
-        .zip(e.chunks_exact_mut(4))
-        .zip(o.chunks_exact_mut(4))
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .zip(e.as_chunks_mut::<4>().0)
+        .zip(o.as_chunks_mut::<4>().0)
     {
-        let r = unpack8(g.try_into().expect("12-byte chunk"));
+        let r = unpack8(g);
         for k in 0..4 {
             let s = if k % 2 == 0 { neg } else { pos };
             e[k] = (f32::from(r[2 * k]) - dc) * s;
@@ -745,11 +751,13 @@ mod tests {
     /// The same bytes packed 8 samples to 12.
     fn pack(raw: &[u8]) -> Vec<u8> {
         let s: Vec<u32> = raw
-            .chunks_exact(2)
-            .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u32::from(u16::from_le_bytes(*b)))
             .collect();
         let mut out = Vec::new();
-        for o in s.chunks_exact(8) {
+        for o in s.as_chunks::<8>().0 {
             let w0 = (o[0] << 20) | (o[1] << 8) | (o[2] >> 4);
             let w1 = ((o[2] & 0xF) << 28) | (o[3] << 16) | (o[4] << 4) | (o[5] >> 8);
             let w2 = ((o[5] & 0xFF) << 24) | (o[6] << 12) | o[7];
