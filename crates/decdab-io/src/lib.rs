@@ -2,20 +2,28 @@
 //! IQ input and output for DecDAB.
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
-//! (replay) or
-//! the live HackRF One. Recording goes out through [`IqFileWriter`].
+//! (replay), the live HackRF One or the live Airspy R2. Recording goes out through [`IqFileWriter`].
 
+pub mod airspy_dsp;
+pub mod airspy_proto;
 pub mod file;
 pub mod wav;
+
+#[cfg(feature = "airspy")]
+pub mod airspy;
 
 #[cfg(feature = "hackrf")]
 pub mod hackrf;
 #[cfg(feature = "hackrf")]
 pub mod hackrf_tx;
 
+pub use airspy_dsp::{IqConverter, MIRROR_SPECTRUM};
+pub use airspy_proto::{AirspyGains, AirspySettings};
 pub use file::{IqFileReader, IqFileWriter, NameHint, format_from_path, name_hint};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
 
+#[cfg(feature = "airspy")]
+pub use airspy::{AirspyControl, AirspyInfo, AirspySource, airspy_info};
 #[cfg(feature = "hackrf")]
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};
 #[cfg(feature = "hackrf")]

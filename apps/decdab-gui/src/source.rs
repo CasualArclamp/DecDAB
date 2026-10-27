@@ -1,12 +1,15 @@
 // made by CasualArclamp
-//! Opening a source and running the engine on it: the HackRF at a block, or
-//! a recorded IQ file.
+//! Opening a source and running the engine on it: the HackRF or the Airspy at
+//! a block, or a recorded IQ file.
 
 use std::path::PathBuf;
 
 use decdab_core::SampleFormat;
 use decdab_engine::{Rx, RxOptions};
 use decdab_io::{IqFileReader, IqSource, format_from_path};
+
+/// The Airspy's three gain stages (indices, with libairspy's presets).
+pub use decdab_io::AirspyGains;
 
 /// The HackRF's three gain stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,12 @@ pub enum Spec {
         rate_hz: f64,
         gains: Gains,
     },
+    Airspy {
+        center_hz: f64,
+        /// The rate delivered (2.048, 4.096 or 8.192 MS/s), not the radio's.
+        rate_hz: f64,
+        gains: AirspyGains,
+    },
     File {
         path: PathBuf,
         center_hz: f64,
@@ -48,6 +57,7 @@ pub enum Spec {
 }
 
 type GainSetter = Box<dyn Fn(Gains) -> Result<(), String>>;
+type AirGainSetter = Box<dyn Fn(AirspyGains) -> Result<(), String>>;
 type Setter<T> = Box<dyn Fn(T) -> Result<(), String>>;
 
 /// A running source.
@@ -55,6 +65,7 @@ pub struct Session {
     pub rx: Rx,
     pub live: bool,
     set_gains: Option<GainSetter>,
+    set_air_gains: Option<AirGainSetter>,
     set_filter: Option<Setter<Option<f32>>>,
     set_ppm: Option<Setter<f32>>,
 }
@@ -95,6 +106,7 @@ impl Session {
                 Ok(Session {
                     rx,
                     live: true,
+                    set_air_gains: None,
                     set_gains: Some(Box::new(move |g| {
                         ctl.set_gains(decdab_io::HackRfGains {
                             amp: g.amp,
@@ -115,6 +127,42 @@ impl Session {
             }
             #[cfg(not(feature = "hackrf"))]
             Spec::HackRf { .. } => Err("built without the hackrf feature".into()),
+            #[cfg(feature = "airspy")]
+            Spec::Airspy {
+                center_hz,
+                rate_hz,
+                gains,
+            } => {
+                use decdab_io::{AirspySettings, AirspySource};
+                let src = AirspySource::open(AirspySettings {
+                    center_hz: center_hz.round() as u64,
+                    sample_rate: rate_hz.round() as u32,
+                    gains: *gains,
+                    packed: false,
+                })
+                .map_err(|e| e.to_string())?;
+                let ctl = src.control();
+                let probe = ctl.clone();
+                let rx = Rx::start(
+                    Box::new(src),
+                    opts,
+                    Some(Box::new(move || probe.overflows())),
+                );
+                // The HackRF's baseband filter and frequency correction
+                // have no counterpart: the Airspy has neither to set.
+                Ok(Session {
+                    rx,
+                    live: true,
+                    set_gains: None,
+                    set_air_gains: Some(Box::new(move |g| {
+                        ctl.set_gains(g).map_err(|e| e.to_string())
+                    })),
+                    set_filter: None,
+                    set_ppm: None,
+                })
+            }
+            #[cfg(not(feature = "airspy"))]
+            Spec::Airspy { .. } => Err("built without the airspy feature".into()),
             Spec::File {
                 path,
                 center_hz,
@@ -129,6 +177,7 @@ impl Session {
                     rx: Rx::start(src, opts, None),
                     live: false,
                     set_gains: None,
+                    set_air_gains: None,
                     set_filter: None,
                     set_ppm: None,
                 })
@@ -146,7 +195,12 @@ impl Session {
         self.set_ppm.as_ref().map_or(Ok(()), |f| f(ppm))
     }
 
-    /// Change the HackRF's gains (no-op for a file).
+    /// Change the Airspy's gains (no-op for anything else).
+    pub fn set_air_gains(&self, g: AirspyGains) -> Result<(), String> {
+        self.set_air_gains.as_ref().map_or(Ok(()), |f| f(g))
+    }
+
+    /// Change the HackRF's gains (no-op for anything else).
     pub fn set_gains(&self, g: Gains) -> Result<(), String> {
         match &self.set_gains {
             Some(f) => f(g),

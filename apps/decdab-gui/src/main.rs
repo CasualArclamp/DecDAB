@@ -5,7 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! DecDAB desktop GUI, laid out as DecDVB-T's.
 //!
-//! A HackRF (or an IQ file) in, the spectrum and waterfall over Band III,
+//! A HackRF or an Airspy R2 (or an IQ file) in, the spectrum and waterfall over Band III,
 //! tuning by block, an IQ recorder and the cost of it all in the status bar;
 //! the ensemble's card and services on the right, with the playing service's
 //! dynamic label and slideshow; and, at the bottom, the DQPSK scopes and the
@@ -37,7 +37,7 @@ use decdab_engine::{Command, CpuGauge, DabStatus, FrontEndSettings, Row, Stats};
 use decdab_fic::Ensemble;
 use decdab_io::name_hint;
 use eframe::egui::{self, Color32, RichText};
-use source::{Gains, Session, Spec};
+use source::{AirspyGains, Gains, Session, Spec};
 use waterfall::{History, RingImage};
 
 const AMBER: Color32 = Color32::from_rgb(255, 176, 40);
@@ -48,8 +48,9 @@ const GREEN: Color32 = Color32::from_rgb(110, 220, 130);
 const SCOPES_PANEL_H: f32 = 250.0;
 /// The display rates the list offers.
 const FPS_CHOICES: [f64; 6] = [5.0, 10.0, 15.0, 20.0, 30.0, 60.0];
-/// HackRF sample rates: DAB's 2.048 MS/s and its multiples (the front end
-/// halves the rate with halfband filters, so no resampler runs).
+/// Sample rates the source delivers: DAB's 2.048 MS/s and its multiples. The
+/// HackRF runs at them (the front end halves the rate with halfband filters,
+/// so no resampler runs); the Airspy's 20 MS/s is brought down to them.
 const RATES_MSPS: [f64; 3] = [2.048, 4.096, 8.192];
 /// Half an ensemble plus a margin: received without retuning only if all of
 /// this is inside the span.
@@ -58,6 +59,8 @@ const ENSEMBLE_HALF_NEEDED_HZ: f64 = 0.85e6;
 struct Options {
     file: Option<PathBuf>,
     block: Option<Block>,
+    /// `--radio airspy|hackrf`: which radio a live source is.
+    radio: Option<SourceKind>,
     rate_msps: Option<f64>,
     screenshot: Option<PathBuf>,
     /// Record the app's own frames to a video: the file, when to start and
@@ -128,6 +131,7 @@ impl Options {
         let mut o = Options {
             file: None,
             block: None,
+            radio: None,
             rate_msps: None,
             screenshot: None,
             record_video: None,
@@ -153,6 +157,13 @@ impl Options {
                     let v = value("a block, e.g. 12B")?;
                     o.block = Some(parse_block(&v).ok_or(format!("not a Band III block: {v}"))?);
                 }
+                "--radio" => {
+                    o.radio = Some(match value("hackrf or airspy")?.to_lowercase().as_str() {
+                        "hackrf" => SourceKind::HackRf,
+                        "airspy" => SourceKind::Airspy,
+                        v => return Err(format!("--radio: not hackrf or airspy: {v}")),
+                    });
+                }
                 "--rate" => {
                     o.rate_msps = Some(value("MS/s")?.parse().map_err(|_| "bad --rate")?);
                 }
@@ -166,8 +177,9 @@ impl Options {
                 }
                 "--bottom" => {
                     let v = value("scopes, channel or none")?;
-                    o.bottom =
-                        Bottom::parse(&v).ok_or(format!("--bottom: not scopes, channel, guide, sfn or none: {v}"))?;
+                    o.bottom = Bottom::parse(&v).ok_or(format!(
+                        "--bottom: not scopes, channel, guide, sfn or none: {v}"
+                    ))?;
                     o.bottom_given = true;
                 }
                 "--window" => o.window = Some(value("sdr")?),
@@ -263,7 +275,7 @@ fn main() -> eframe::Result {
             eprintln!("decdab-gui: {e}");
             eprintln!(
                 "usage: decdab-gui [capture.cs8] [--block 12B] [--rate MSPS] [--play SERVICE] \
-                 [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
+                 [--radio hackrf|airspy] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
                  [--window sdr] [--mute] [--no-decode]"
             );
             std::process::exit(2);
@@ -302,7 +314,15 @@ fn main() -> eframe::Result {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     HackRf,
+    Airspy,
     File,
+}
+
+impl SourceKind {
+    /// A live radio rather than a file.
+    fn is_radio(self) -> bool {
+        self != SourceKind::File
+    }
 }
 
 struct App {
@@ -332,6 +352,8 @@ struct App {
     block_text: String,
     rate_msps: f64,
     gains: Gains,
+    /// The Airspy's gains (its own ranges, not the HackRF's).
+    air_gains: AirspyGains,
     file: Option<PathBuf>,
     file_centre_mhz: f64,
     file_rate_msps: f64,
@@ -393,6 +415,8 @@ struct App {
     keeper: Option<remember::Keeper>,
     recorder: Option<recorder::Recorder>,
     radio: (Block, f64),
+    /// The radio last used (HackRf or Airspy): kept while a file is open.
+    radio_kind: SourceKind,
     window_size: (u32, u32),
 }
 
@@ -410,10 +434,15 @@ impl App {
             block = block_at(h).unwrap_or(block);
         }
         let file = kept.file.clone().filter(|f| f.exists());
+        let radio = opts.radio.unwrap_or(if kept.airspy {
+            SourceKind::Airspy
+        } else {
+            SourceKind::HackRf
+        });
         let kind = if !by_hand && kept.file_source && file.is_some() {
             SourceKind::File
         } else {
-            SourceKind::HackRf
+            radio
         };
         let volume = prefs::volume();
         decdab_audio::set_volume(volume);
@@ -428,6 +457,7 @@ impl App {
             delay_ms: 1000.0 / 15.0,
             session: None,
             kind,
+            radio_kind: radio,
             block,
             block_text: block.name.to_string(),
             rate_msps: opts
@@ -435,6 +465,7 @@ impl App {
                 .or(kept.rate_msps.filter(|r| RATES_MSPS.contains(r)))
                 .unwrap_or(4.096),
             gains: kept.gains.unwrap_or_default(),
+            air_gains: kept.air_gains.unwrap_or_default(),
             file,
             file_centre_mhz: kept.file_centre_mhz.unwrap_or(0.0),
             file_rate_msps: kept.file_rate_msps.unwrap_or(4.096),
@@ -508,7 +539,7 @@ impl App {
     }
 
     fn snapshot(&self) -> remember::Snapshot {
-        let (block, tune_hz) = if self.kind == SourceKind::HackRf {
+        let (block, tune_hz) = if self.kind.is_radio() {
             (self.block, self.tune_hz)
         } else {
             self.radio
@@ -519,6 +550,8 @@ impl App {
             file_source: self.kind == SourceKind::File,
             rate_khz: (self.rate_msps * 1e3).round() as i64,
             gains: self.gains,
+            airspy: self.radio_kind == SourceKind::Airspy,
+            air_gains: self.air_gains,
             file: self
                 .file
                 .as_ref()
@@ -540,8 +573,9 @@ impl App {
         if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
             self.window_size = (r.width().round() as u32, r.height().round() as u32);
         }
-        if self.kind == SourceKind::HackRf {
+        if self.kind.is_radio() {
             self.radio = (self.block, self.tune_hz);
+            self.radio_kind = self.kind;
         }
         let now = self.snapshot();
         if let Some(k) = self.keeper.as_mut()
@@ -565,6 +599,18 @@ impl App {
                     center_hz: fc,
                     rate_hz: self.rate_msps * 1e6,
                     gains: self.gains,
+                };
+                self.begin(spec, Some(fc));
+            }
+            SourceKind::Airspy => {
+                let fc = self.tune_hz;
+                if fc <= 0.0 {
+                    return;
+                }
+                let spec = Spec::Airspy {
+                    center_hz: fc,
+                    rate_hz: self.rate_msps * 1e6,
+                    gains: self.air_gains,
                 };
                 self.begin(spec, Some(fc));
             }
@@ -864,6 +910,10 @@ impl App {
     }
 
     fn start_optimiser(&mut self) {
+        if self.kind == SourceKind::Airspy {
+            self.note = "The gain optimiser is for the HackRF; the Airspy has presets".into();
+            return;
+        }
         if !self.session.as_ref().is_some_and(|s| s.live) {
             self.note = "Optimising the gain needs a live radio".into();
             return;
@@ -921,6 +971,14 @@ impl App {
         }
     }
 
+    fn change_air_gains(&mut self) {
+        if let Some(s) = &self.session
+            && let Err(e) = s.set_air_gains(self.air_gains)
+        {
+            self.note = e;
+        }
+    }
+
     fn change_gains(&mut self) {
         if let Some(s) = &self.session
             && let Err(e) = s.set_gains(self.gains)
@@ -952,7 +1010,11 @@ impl App {
             block_at(self.centre_hz).map_or("f".to_string(), |b| b.name.to_ascii_lowercase()),
             self.centre_hz / 1e6,
             self.stats.sample_rate / 1e6,
-            if self.gains.amp { "_amp" } else { "" },
+            match self.kind {
+                SourceKind::Airspy => "_airspy",
+                _ if self.gains.amp => "_amp",
+                _ => "",
+            },
             utc_stamp()
         );
         let path = dir.join(name);
@@ -1080,10 +1142,7 @@ impl App {
                 "code rate",
                 format!("{}/{} · {rate_name}", rate.0, rate.1),
             ));
-            details.push(kv(
-                "EId",
-                e.eid.map_or("–".into(), |v| format!("{v:04X}")),
-            ));
+            details.push(kv("EId", e.eid.map_or("–".into(), |v| format!("{v:04X}"))));
             details.push(kv("services", e.services.len().to_string()));
             details.push(kv("sub-channels", e.subchannels.len().to_string()));
             details.push(kv("FIBs good", format!("{:.0} %", d.fib_ok_ratio * 100.0)));
@@ -1166,21 +1225,25 @@ impl App {
     fn control_rows(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let running = self.session.is_some();
-            let live = self.kind == SourceKind::HackRf;
-
+            let live = self.kind.is_radio();
             let before = self.kind;
             egui::ComboBox::from_id_salt("source")
-                .selected_text(if live { "HackRF" } else { "IQ file" })
-                .width(80.0)
+                .selected_text(match self.kind {
+                    SourceKind::HackRf => "HackRF",
+                    SourceKind::Airspy => "Airspy R2",
+                    SourceKind::File => "IQ file",
+                })
+                .width(90.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.kind, SourceKind::HackRf, "HackRF");
+                    ui.selectable_value(&mut self.kind, SourceKind::Airspy, "Airspy R2");
                     ui.selectable_value(&mut self.kind, SourceKind::File, "IQ file");
                 });
             if before != self.kind && running {
                 self.stop();
             }
 
-            if self.kind == SourceKind::HackRf {
+            if self.kind.is_radio() {
                 ui.label("block");
                 if ui.small_button("◀").clicked() {
                     self.step_block(false);
@@ -1194,7 +1257,8 @@ impl App {
                     match parse_block(&self.block_text) {
                         Some(b) => self.tune_block(b),
                         None => {
-                            self.note = format!("not a Band III block (5A–13F): {}", self.block_text)
+                            self.note =
+                                format!("not a Band III block (5A–13F): {}", self.block_text)
                         }
                     }
                     self.block_text = self.block.name.to_string();
@@ -1220,17 +1284,33 @@ impl App {
                 }
 
                 ui.separator();
-                let mut g = self.gains;
-                ui.label("LNA");
-                ui.add(egui::DragValue::new(&mut g.lna).range(0..=40).speed(0.2));
-                ui.label("VGA");
-                ui.add(egui::DragValue::new(&mut g.vga).range(0..=62).speed(0.2));
-                ui.checkbox(&mut g.amp, "amp");
-                g.lna = g.lna / 8 * 8;
-                g.vga = g.vga / 2 * 2;
-                if g != self.gains {
-                    self.gains = g;
-                    self.change_gains();
+                if self.kind == SourceKind::Airspy {
+                    // The Airspy's three stages are indices, not dB.
+                    let mut g = self.air_gains;
+                    ui.label("LNA");
+                    ui.add(egui::DragValue::new(&mut g.lna).range(0..=14).speed(0.1));
+                    ui.label("mixer");
+                    ui.add(egui::DragValue::new(&mut g.mixer).range(0..=15).speed(0.1));
+                    ui.label("VGA");
+                    ui.add(egui::DragValue::new(&mut g.vga).range(0..=15).speed(0.1));
+                    sdr::air_presets(ui, &mut g);
+                    if g != self.air_gains {
+                        self.air_gains = g.clamped();
+                        self.change_air_gains();
+                    }
+                } else {
+                    let mut g = self.gains;
+                    ui.label("LNA");
+                    ui.add(egui::DragValue::new(&mut g.lna).range(0..=40).speed(0.2));
+                    ui.label("VGA");
+                    ui.add(egui::DragValue::new(&mut g.vga).range(0..=62).speed(0.2));
+                    ui.checkbox(&mut g.amp, "amp");
+                    g.lna = g.lna / 8 * 8;
+                    g.vga = g.vga / 2 * 2;
+                    if g != self.gains {
+                        self.gains = g;
+                        self.change_gains();
+                    }
                 }
             } else {
                 match &self.file {
@@ -1279,7 +1359,9 @@ impl App {
             ui.separator();
             if ui
                 .selectable_label(self.sdr_open, "⚙ SDR")
-                .on_hover_text("DC removal, I/Q balance, filter, frequency correction, gain optimiser")
+                .on_hover_text(
+                    "DC removal, I/Q balance, filter, frequency correction, gain optimiser",
+                )
                 .clicked()
             {
                 self.sdr_open = !self.sdr_open;
@@ -1476,7 +1558,13 @@ impl App {
             }
         });
         ui.separator();
-        if let Some(a) = services::list(ui, &ens, &mut self.selected, self.dab.playing, &mut self.logos) {
+        if let Some(a) = services::list(
+            ui,
+            &ens,
+            &mut self.selected,
+            self.dab.playing,
+            &mut self.logos,
+        ) {
             action = Some(a);
         }
         match action {
@@ -1507,8 +1595,9 @@ fn find_service(e: &Ensemble, pat: &str) -> Option<u32> {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.kind == SourceKind::HackRf {
+        if self.kind.is_radio() {
             self.radio = (self.block, self.tune_hz);
+            self.radio_kind = self.kind;
         }
         let now = self.snapshot();
         if let Some(k) = self.keeper.as_mut() {
@@ -1597,12 +1686,10 @@ impl eframe::App for App {
                 });
         }
         if self.bottom == Bottom::Sfn {
-            egui::Panel::bottom("sfn")
-                .resizable(false)
-                .show(ui, |ui| {
-                    ui.set_min_height(SCOPES_PANEL_H);
-                    self.sfn_view.show(ui, SCOPES_PANEL_H - 8.0);
-                });
+            egui::Panel::bottom("sfn").resizable(false).show(ui, |ui| {
+                ui.set_min_height(SCOPES_PANEL_H);
+                self.sfn_view.show(ui, SCOPES_PANEL_H - 8.0);
+            });
         }
         if self.bottom == Bottom::Guide {
             egui::Panel::bottom("guide")
@@ -1611,8 +1698,12 @@ impl eframe::App for App {
                     ui.set_min_height(SCOPES_PANEL_H);
                     ui.set_max_height(SCOPES_PANEL_H);
                     let ens = Arc::clone(&self.ensemble);
-                    self.guide
-                        .show(ui, &ens, self.dab.playing.or(self.want_play), &mut self.logos);
+                    self.guide.show(
+                        ui,
+                        &ens,
+                        self.dab.playing.or(self.want_play),
+                        &mut self.logos,
+                    );
                 });
         }
         egui::Panel::right("services")
@@ -1666,6 +1757,7 @@ impl eframe::App for App {
                 sdr::SdrView {
                     settings: &mut self.sdr,
                     gains: &mut self.gains,
+                    air_gains: (self.kind == SourceKind::Airspy).then_some(&mut self.air_gains),
                     live,
                     front_end: self.stats.front_end,
                     optimiser: self.optimiser.as_ref(),
@@ -1674,6 +1766,9 @@ impl eframe::App for App {
             );
             if asks.gains_changed {
                 self.change_gains();
+            }
+            if asks.air_gains_changed {
+                self.change_air_gains();
             }
             if asks.optimise {
                 self.start_optimiser();
@@ -1685,10 +1780,12 @@ impl eframe::App for App {
                 self.sdr = sdr::SdrSettings::default();
                 self.gains = Gains::default();
                 self.change_gains();
+                self.air_gains = AirspyGains::default();
+                self.change_air_gains();
             }
         }
         if let Some(b) = tune {
-            if self.session.is_none() && self.kind == SourceKind::HackRf {
+            if self.session.is_none() && self.kind.is_radio() {
                 self.block = b;
                 self.block_text = b.name.to_string();
                 self.tune_hz = b.hz();

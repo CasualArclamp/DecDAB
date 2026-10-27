@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::prefs;
-use crate::source::Gains;
+use crate::source::{AirspyGains, Gains};
 
 /// How long a change has to hold still before it is written.
 const SETTLE: Duration = Duration::from_millis(800);
@@ -30,6 +30,9 @@ pub struct Snapshot {
     pub file_source: bool,
     pub rate_khz: i64,
     pub gains: Gains,
+    /// The radio last used: the Airspy (else the HackRF), and its gains.
+    pub airspy: bool,
+    pub air_gains: AirspyGains,
     /// The capture last opened, its centre and rate.
     pub file: String,
     pub file_centre_hz: i64,
@@ -47,7 +50,13 @@ impl Snapshot {
         prefs::set_many(&[
             ("block", &self.block),
             ("tune_hz", &self.tune_hz.to_string()),
+            // "source" keeps the two values older versions wrote and read; the
+            // radio is a key of its own.
             ("source", if self.file_source { "file" } else { "hackrf" }),
+            ("radio", if self.airspy { "airspy" } else { "hackrf" }),
+            ("air_lna", &self.air_gains.lna.to_string()),
+            ("air_mixer", &self.air_gains.mixer.to_string()),
+            ("air_vga", &self.air_gains.vga.to_string()),
             ("rate_khz", &self.rate_khz.to_string()),
             ("lna", &self.gains.lna.to_string()),
             ("vga", &self.gains.vga.to_string()),
@@ -72,6 +81,8 @@ pub struct Saved {
     pub file_source: bool,
     pub rate_msps: Option<f64>,
     pub gains: Option<Gains>,
+    pub airspy: bool,
+    pub air_gains: Option<AirspyGains>,
     pub file: Option<PathBuf>,
     pub file_centre_mhz: Option<f64>,
     pub file_rate_msps: Option<f64>,
@@ -97,6 +108,15 @@ impl Saved {
             }),
             _ => None,
         };
+        // The Airspy's, in its own ranges (0–14, 0–15, 0–15).
+        let air_gains = match (
+            prefs::number::<u8>("air_lna"),
+            prefs::number::<u8>("air_mixer"),
+            prefs::number::<u8>("air_vga"),
+        ) {
+            (Some(lna), Some(mixer), Some(vga)) => Some(AirspyGains { lna, mixer, vga }.clamped()),
+            _ => None,
+        };
         let window = prefs::get("window").and_then(|v| {
             let (w, h) = v.split_once('x')?;
             let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
@@ -106,12 +126,13 @@ impl Saved {
             ))
         });
         Saved {
-            block: prefs::get("block")
-                .filter(|b| decdab_core::channel::parse_block(b).is_some()),
+            block: prefs::get("block").filter(|b| decdab_core::channel::parse_block(b).is_some()),
             tune_hz: prefs::number("tune_hz").filter(|h: &f64| *h >= 1e6),
             file_source: prefs::get("source").is_some_and(|v| v == "file"),
             rate_msps: prefs::number::<i64>("rate_khz").map(|k| k as f64 / 1e3),
             gains,
+            airspy: prefs::get("radio").is_some_and(|v| v == "airspy"),
+            air_gains,
             file: prefs::get("file")
                 .filter(|f| !f.is_empty())
                 .map(PathBuf::from),
@@ -189,6 +210,8 @@ mod tests {
                 lna,
                 vga: 8,
             },
+            airspy: false,
+            air_gains: AirspyGains::default(),
             file: String::new(),
             file_centre_hz: 0,
             file_rate_khz: 10_000,

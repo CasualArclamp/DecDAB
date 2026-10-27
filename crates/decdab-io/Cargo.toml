@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "decdab-io"
-description = "DecDAB I/O: IQ file replay/record and the HackRF front end"
+description = "DecDAB I/O: IQ file replay/record, the HackRF and Airspy front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,10 +14,21 @@ default = []
 # libusb, no DLLs — the portable exe stays a single file. On Windows the HackRF
 # must use the WinUSB driver (Zadig, or the in-box winusb.inf).
 hackrf = ["dep:seify-hackrfone"]
+# Live Airspy R2 front end, also pure Rust over USB (nusb, as the HackRF's
+# driver uses): no libairspy, no libusb, no DLLs. On Windows the Airspy must
+# use the WinUSB driver (Zadig). The protocol and the real-to-IQ converter
+# are plain code and are built (and tested) without the feature.
+airspy = ["dep:nusb"]
 
 [dependencies]
 decdab-core = { path = "../decdab-core" }
+decdab-dsp = { path = "../decdab-dsp" }
 num-complex.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 seify-hackrfone = { version = "0.2.2", optional = true }
+# The version seify-hackrfone builds on, so the lock file holds one copy.
+nusb = { version = "0.1.14", optional = true }
+
+[dev-dependencies]
+rustfft.workspace = true

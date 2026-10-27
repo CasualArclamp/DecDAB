@@ -146,6 +146,94 @@ follows the bitstream order), the two-CRC 8/12-band case (groups 0–3 and 4–7
 from Annex B.3), MPEG-2 LSF, and the sound of the concealment on a real weak
 signal (no captures with errors were at hand).
 
+## 2026-10-27 — Airspy R2 front end
+
+**Built in the cloud, with no radio.** A second live front end beside the
+HackRF, in pure Rust over USB (`nusb`, no libairspy / libusb / DLLs):
+`decdab-io` `airspy_proto.rs` (the protocol as pure functions, the gain
+tables, the 12-bit unpacker), `airspy_dsp.rs` (the real-to-IQ converter and
+the buffer hand-over), `airspy.rs` (device, reader thread, control handle,
+`airspy_info()`), behind the `airspy` feature (default-on in the CLI and GUI).
+CLI: `--radio hackrf|airspy`, `--airspy-preset`, `--airspy-lna/-mixer/-vga`,
+`--airspy-packed`, `decdab airspy`; every existing HackRF invocation parses and
+behaves as before. GUI: "Airspy R2" in the Source combo, its own gain row and
+SDR-window section, `--radio`, remembered (old prefs still load). Design in
+DESIGN.md §6.
+
+**Verified offline** (`cargo test`, `clippy -D warnings`): every USB command's
+encoding (request, value, index, data), the start sequence's order, the rate-list
+parser, gain clamps and the 22-entry presets, the packed-sample unpacker bit by
+bit and by round trip, that no sequence sends the bias tee anything but 0 (and
+that `airspy.rs` builds no `GPIO_WRITE`); libairspy's half-band against its
+spec with `rustfft` (ripple 0.013 dB to 3.9 MHz; **58.7 dB** stop band from
+6.1 MHz, not the 62 dB quoted); the converter with synthetic 20 MS/s tones
+through the real code (the same bytes packed and unpacked; any split of the input
+into pieces): frequency and amplitude right at ±1 MHz (±0.7 at 2.048 MS/s),
+flat within 0.1 dB over ±0.768 MHz at 2.048, 4.096 and 8.192 MS/s, worst alias
+into the ensemble **−57.7 dBc** over tones anywhere in the converter's band, a
+DC offset gone; a fake reader for the retune path (queue drained, in-flight
+buffers skipped, buffers handed back). A full-scale ADC tone gives |IQ| = 1.0,
+like a full-scale cs8 tone from the HackRF.
+
+**CPU** of the whole real-to-IQ chain (`cargo test --release -p decdab-io
+bench_converter -- --ignored --nocapture`; best of 9 on a shared 2.1 GHz Xeon
+VM, so a desktop should do better): see the table. Input is 20 MS/s of
+unpacked 16-bit samples (40 MB/s).
+
+| output | half-bands | ns / raw sample | ns / output sample | % of one core at 20 MS/s in |
+|---|---|---|---|---|
+| 4.096 MS/s | 1 (default) | 2.74 | 13.4 | 5.5 |
+| 4.096 MS/s | 0 | 3.27 | 16.0 | 6.5 |
+| 4.096 MS/s, packed input | 1 | 2.94 | 14.3 | 5.9 |
+| 2.048 MS/s | 2 (default) | 3.47 | 33.9 | 6.9 |
+| 2.048 MS/s | 1 | 4.49 | 43.8 | 9.0 |
+| 8.192 MS/s | 0 (default) | 3.63 | 8.9 | 7.3 |
+
+(20 MS/s of raw samples is 10 MS/s of IQ, libairspy's `iqconverter` rate;
+the 1.2 ns/raw sample of that is the load and libairspy's half-band, the rest
+is the later stages.)
+
+The default is the cheapest of each: 1 half-band at 4.096 MS/s, 2 at 2.048, none
+at 8.192. For comparison the HackRF path's whole front end is 2.3 % at
+4.096 MS/s (above): the Airspy's costs more because it has twice the samples
+and a resampler to bring 10 MS/s to 4.096, in return for 12 bits. The USB side
+(a reader thread handing 256 KiB buffers over) was not measured.
+
+### Needs a live check on the owner's machine (Airspy R2, WinUSB)
+
+In this order; none could be tried in the cloud.
+
+1. **Spectral orientation.** The sign pattern is libairspy's and assumes the
+   R820T puts RF `centre + δ` at IF `5 MHz − δ`. Tune a block, look at the
+   waterfall: a station whose edge you know (a neighbouring block, an FM
+   carrier through a known filter) or `decdab info`/`decode` working at all: a
+   mirrored band does not lock. If it is mirrored, set
+   `airspy_dsp::MIRROR_SPECTRUM = true` (the one constant; the test follows it).
+2. **Tuned frequency accuracy.** On a known ensemble the receiver reports its
+   carrier offset (the GUI card; `decdab info`): expect a few tens of Hz, as
+   the HackRF's 3–20 Hz at 220 MHz. A large offset means the IF the firmware
+   assumes is not 5 MHz in the sample stream.
+3. **40 MB/s unpacked without dropped buffers.** `decdab capture 12B --radio
+   airspy --seconds 60` prints the dropped buffers (and the GUI's status bar);
+   zero is expected. If not, try `--airspy-packed` (30 MB/s), and a different
+   USB port (not a hub).
+4. **The gain preset for Band III.** Default `sensitivity:15` (LNA 14, mixer 10,
+   VGA 7) is a guess from the HackRF needing its amp, LNA 40 and VGA 20 here.
+   Try `--airspy-preset sensitivity:12..21` and `linearity:` ones; the capture
+   prints rms and clipping, and the GUI shows the MER.
+5. **Retune between ensembles.** In the GUI step the blocks (◀ ▶) and type a
+   block; `decdab scan --radio airspy` walks the band. Each retune throws away
+   the queued buffers and the 9 next (about 60 ms); check an ensemble locks
+   afresh after each and that the old one's services are gone.
+6. **A real DAB / DAB+ decode and its MER against the HackRF.** `decdab decode
+   11D --radio airspy -s "Classic FM" -o out/x.wav` (a DAB+ one and an MP2 one)
+   and the GUI card's MER on the same block, aerial and hour as a HackRF run.
+   The Airspy's 12 bits and the converter's filtering should give the same or
+   a better MER.
+7. Also unchecked: `decdab airspy` prints the board id, firmware string and
+   the sample rates (R2: 10 and 2.5 MS/s); unplugging mid-stream gives an
+   error rather than a hang; closing the app stops the radio (its LED / current).
+
 ### Gaps
 
 - FIG 0/13 is attached only when 0/2 came first (fine in practice; the
