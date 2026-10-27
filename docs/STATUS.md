@@ -203,6 +203,15 @@ and a resampler to bring 10 MS/s to 4.096, in return for 12 bits. The USB side
 
 In this order; none could be tried in the cloud.
 
+*Update 2026-10-27.* The same USB and driver design (nusb, the start sequence,
+the 10 MS/s stream, the fs/4 orientation constant) was proven live on a real
+R2 in the sibling DecDVB-T receiver: it opens, streams 10 MS/s with no dropped
+buffers, the spectrum is the right way round and tuning is accurate. That
+covers items 1 to 3 for the shared code, not DAB reception itself: nothing here
+has been run against a DAB signal yet, so the list stays as it is. One fix came
+out of it: the firmware version read returns a shorter reply than asked
+(48 bytes of 127), which is accepted (libairspy takes what comes back).
+
 1. **Spectral orientation.** The sign pattern is libairspy's and assumes the
    R820T puts RF `centre + δ` at IF `5 MHz − δ`. Tune a block, look at the
    waterfall: a station whose edge you know (a neighbouring block, an FM
