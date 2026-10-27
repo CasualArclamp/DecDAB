@@ -2,14 +2,17 @@
 //! DecDAB command line.
 //!
 //! - `blocks`: the Band III block plan.
-//! - `scan`: step the HackRF over Band III and say which blocks carry an
+//! - `scan`: step the radio over Band III and say which blocks carry an
 //!   ensemble (a flat 1.536 MHz block with a gap either side).
-//! - `capture`: record a block (or a frequency) from the HackRF to an IQ
+//! - `capture`: record a block (or a frequency) from the radio to an IQ
 //!   file named by its tuning, so the GUI and CLI can read the centre and
 //!   rate back from the name.
 //! - `decode`: one service to a WAV file, with the decoding figures.
-//! - `info`: lock to an ensemble (a capture or a block on the HackRF) and
+//! - `info`: lock to an ensemble (a capture or a block on the radio) and
 //!   list what its FIC says: label, services, sub-channels, the time.
+//! - `airspy`: what the Airspy says about itself (board, firmware, rates).
+//!
+//! The radio is the HackRF One unless `--radio airspy` says otherwise.
 
 mod decode;
 mod info;
@@ -18,10 +21,11 @@ mod source;
 use std::path::PathBuf;
 use std::time::Instant;
 
-#[allow(unused_imports)] // `bail` is only used without the hackrf feature
+#[allow(unused_imports)] // `bail` is only used without a radio feature
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use decdab_core::channel::{BAND_III, block_at, parse_block, scan_blocks};
+use decdab_io::AirspyGains;
 
 #[derive(Parser)]
 #[command(name = "decdab", version, about = "DAB / DAB+ receiver")]
@@ -34,7 +38,7 @@ struct Cli {
 enum Command {
     /// List the Band III blocks and their centre frequencies.
     Blocks,
-    /// Step the HackRF over Band III and report each block's level and
+    /// Step the radio over Band III and report each block's level and
     /// whether it looks like a DAB ensemble.
     Scan {
         #[command(flatten)]
@@ -43,9 +47,9 @@ enum Command {
         #[arg(long, default_value_t = 0.3)]
         dwell: f64,
     },
-    /// List an ensemble's services from a capture or a block on the HackRF.
+    /// List an ensemble's services from a capture or a block on the radio.
     Info {
-        /// An IQ file, or a block ("12B") / frequency in MHz for the HackRF.
+        /// An IQ file, or a block ("12B") / frequency in MHz for the radio.
         source: String,
         /// Seconds to listen.
         #[arg(long, default_value_t = 4.0)]
@@ -55,11 +59,14 @@ enum Command {
     },
     /// Decode one service to a WAV file and report on it.
     Decode(Box<decode::DecodeArgs>),
-    /// Record a block ("12B") or a frequency in MHz from the HackRF.
+    /// What the Airspy says about itself: board, firmware, sample rates.
+    Airspy,
+    /// Record a block ("12B") or a frequency in MHz from the radio.
     Capture {
         /// A Band III block ("12B") or a centre frequency in MHz.
         what: String,
-        /// HackRF sample rate, MS/s: 2.048 (DAB's own) or a multiple of it.
+        /// Sample rate, MS/s: 2.048 (DAB's own) or a multiple of it (4.096 and
+        /// 8.192 for the Airspy too).
         #[arg(long, default_value_t = 4.096)]
         rate: f64,
         /// Seconds to record.
@@ -67,23 +74,67 @@ enum Command {
         seconds: f64,
         #[command(flatten)]
         gains: Gains,
-        /// Output file; by default captures/<block>_<MHz>MHz_<rate>Msps[_amp].cs8.
+        /// Output file; by default captures/<block>_<MHz>MHz_<rate>Msps[_amp].cs8
+        /// (HackRF) or ..._airspy.cs16 (Airspy: 16-bit, it has 12 bits).
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
 }
 
+/// The radio a live source is read from.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Radio {
+    /// HackRF One.
+    Hackrf,
+    /// Airspy R2 (also the original Airspy).
+    Airspy,
+}
+
+/// The radio and its gains: `--lna/--vga/--amp` are the HackRF's, the
+/// `--airspy-*` ones the Airspy's. Unused by a file.
 #[derive(clap::Args, Clone, Copy)]
 pub struct Gains {
-    /// IF (LNA) gain, 0–40 dB in 8 dB steps.
+    /// The radio for a live source.
+    #[arg(long, value_enum, default_value = "hackrf")]
+    pub radio: Radio,
+    /// HackRF: IF (LNA) gain, 0–40 dB in 8 dB steps.
     #[arg(long, default_value_t = 40)]
     pub lna: u16,
-    /// Baseband (VGA) gain, 0–62 dB in 2 dB steps.
+    /// HackRF: baseband (VGA) gain, 0–62 dB in 2 dB steps.
     #[arg(long, default_value_t = 20)]
     pub vga: u16,
-    /// The HackRF's RF amplifier (+14 dB). The antenna-port power stays off.
+    /// HackRF: the RF amplifier (+14 dB). The antenna-port power stays off.
     #[arg(long)]
     pub amp: bool,
+    /// Airspy: a libairspy gain preset, `sensitivity:N` or `linearity:N`
+    /// (N 0–21, 21 the most gain). Default: sensitivity:15.
+    #[arg(long, value_parser = AirspyGains::parse_preset, conflicts_with_all = ["airspy_lna", "airspy_mixer", "airspy_vga"])]
+    pub airspy_preset: Option<AirspyGains>,
+    /// Airspy: LNA gain, 0–14 (default: the preset's).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=14))]
+    pub airspy_lna: Option<u8>,
+    /// Airspy: mixer gain, 0–15.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=15))]
+    pub airspy_mixer: Option<u8>,
+    /// Airspy: VGA gain, 0–15.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=15))]
+    pub airspy_vga: Option<u8>,
+    /// Airspy: 12-bit packed transfers (30 instead of 40 MB/s on the USB).
+    #[arg(long)]
+    pub airspy_packed: bool,
+}
+
+impl Gains {
+    /// The Airspy's gains: the preset (or the default one), with any single
+    /// stage given on the command line put over it.
+    pub fn airspy_gains(&self) -> AirspyGains {
+        let base = self.airspy_preset.unwrap_or_default();
+        AirspyGains {
+            lna: self.airspy_lna.unwrap_or(base.lna),
+            mixer: self.airspy_mixer.unwrap_or(base.mixer),
+            vga: self.airspy_vga.unwrap_or(base.vga),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -95,6 +146,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Scan { gains, dwell } => scan(gains, dwell),
+        Command::Airspy => airspy_info(),
         Command::Decode(a) => decode::run(*a),
         Command::Info {
             source,
@@ -124,39 +176,55 @@ pub fn tuning(what: &str) -> Result<f64> {
     Ok(mhz * 1e6)
 }
 
-#[cfg(feature = "hackrf")]
-pub fn open(hz: f64, rate: f64, g: Gains) -> Result<decdab_io::HackRfSource> {
-    use decdab_io::{HackRfGains, HackRfSettings, HackRfSource};
-    Ok(HackRfSource::open(HackRfSettings {
-        center_hz: hz.round() as u64,
-        sample_rate: (rate * 1e6).round() as u32,
-        gains: HackRfGains {
-            amp: g.amp,
-            lna_db: g.lna,
-            vga_db: g.vga,
-        },
-    })?)
+/// The radio, tuned to `hz` (Hz) at `rate` (MS/s).
+pub fn open(hz: f64, rate: f64, g: Gains) -> Result<source::Live> {
+    source::open_live(hz, rate, g)
 }
 
-#[cfg(feature = "hackrf")]
+#[cfg(feature = "airspy")]
+fn airspy_info() -> Result<()> {
+    let i = decdab_io::airspy_info()?;
+    println!("board     {} (id {})", i.board_name, i.board_id);
+    println!("firmware  {}", i.firmware);
+    let rates: Vec<String> = i
+        .sample_rates
+        .iter()
+        .map(|r| format!("{} MS/s", *r as f64 / 1e6))
+        .collect();
+    println!(
+        "rates     {} (DecDAB uses 10 MS/s IQ, 20 MS/s ADC)",
+        rates.join(", ")
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "airspy"))]
+fn airspy_info() -> Result<()> {
+    bail!("built without the airspy feature")
+}
+
 fn capture(what: &str, rate: f64, seconds: f64, g: Gains, out: Option<PathBuf>) -> Result<()> {
     use decdab_core::SampleFormat;
     use decdab_io::{IqFileWriter, IqSource};
     let hz = tuning(what)?;
+    // The HackRF's samples are 8-bit; the Airspy's are 12-bit, so 16.
+    let (fmt, ext, tag) = match g.radio {
+        Radio::Hackrf => (SampleFormat::Cs8, "cs8", if g.amp { "_amp" } else { "" }),
+        Radio::Airspy => (SampleFormat::Cs16, "cs16", "_airspy"),
+    };
     let path = out.unwrap_or_else(|| {
         let block = block_at(hz).map_or("f".to_string(), |b| b.name.to_ascii_lowercase());
         PathBuf::from(format!(
-            "captures/{block}_{:.3}MHz_{}Msps{}.cs8",
+            "captures/{block}_{:.3}MHz_{}Msps{tag}.{ext}",
             hz / 1e6,
-            rate,
-            if g.amp { "_amp" } else { "" }
+            rate
         ))
     });
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
     }
     let mut src = open(hz, rate, g)?;
-    let mut w = IqFileWriter::create(&path, SampleFormat::Cs8)?;
+    let mut w = IqFileWriter::create(&path, fmt)?;
     let want = (seconds * rate * 1e6) as usize;
     let (mut n, mut peak, mut pow, mut clip) = (0usize, 0f32, 0f64, 0usize);
     let mut buf = Vec::new();
@@ -178,7 +246,7 @@ fn capture(what: &str, rate: f64, seconds: f64, g: Gains, out: Option<PathBuf>) 
         n += take;
     }
     w.finish()?;
-    let drops = src.control().overflows();
+    let drops = src.overflows();
     println!(
         "{}: {:.1} s in {:.1} s, rms {:.1} dBFS, peak {:.0} %, clipped {:.3} %, dropped buffers {drops}",
         path.display(),
@@ -195,7 +263,6 @@ fn capture(what: &str, rate: f64, seconds: f64, g: Gains, out: Option<PathBuf>) 
 
 /// The averaged power spectrum of `secs` of samples, `n` bins, DC in the
 /// middle, dB.
-#[cfg(feature = "hackrf")]
 fn spectrum(src: &mut dyn decdab_io::IqSource, n: usize, secs: f64) -> Result<Vec<f32>> {
     use num_complex::Complex32;
     use rustfft::FftPlanner;
@@ -228,7 +295,6 @@ fn spectrum(src: &mut dyn decdab_io::IqSource, n: usize, secs: f64) -> Result<Ve
         .collect())
 }
 
-#[cfg(feature = "hackrf")]
 fn scan(g: Gains, dwell: f64) -> Result<()> {
     use decdab_io::IqSource;
     const RATE: f64 = 4.096;
@@ -269,14 +335,4 @@ fn scan(g: Gains, dwell: f64) -> Result<()> {
     }
     drop(src);
     Ok(())
-}
-
-#[cfg(not(feature = "hackrf"))]
-fn scan(_: Gains, _: f64) -> Result<()> {
-    bail!("built without the hackrf feature")
-}
-
-#[cfg(not(feature = "hackrf"))]
-fn capture(_: &str, _: f64, _: f64, _: Gains, _: Option<PathBuf>) -> Result<()> {
-    bail!("built without the hackrf feature")
 }

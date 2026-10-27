@@ -14,13 +14,18 @@ cargo clippy --workspace --all-targets --release -- -D warnings
 cargo run --release -p decdab-cli -- blocks                           # the Band III plan
 cargo run --release -p decdab-cli -- scan --amp                       # HackRF: which blocks carry an ensemble
 cargo run --release -p decdab-cli -- capture 12B --amp --seconds 10   # captures/12b_225.648MHz_4.096Msps_amp.cs8
+cargo run --release -p decdab-cli -- airspy                           # Airspy R2: board, firmware, sample rates
+cargo run --release -p decdab-cli -- info 12B --radio airspy --airspy-preset sensitivity:15   # the same live, from the Airspy (--airspy-lna/-mixer/-vga, --airspy-packed)
+cargo run --release -p decdab-cli -- capture 12B --radio airspy --seconds 10   # captures/12b_225.648MHz_4.096Msps_airspy.cs16
+cargo test --release -p decdab-io bench_converter -- --ignored --nocapture      # the Airspy's real-to-IQ chain: ns a sample, % of a core
+cargo test --release -p decdab-io --features airspy live_airspy -- --ignored --nocapture   # Airspy attached: 3 s stream, retune
 cargo run --release -p decdab-cli -- info captures/12b_225.648MHz_4.096Msps_amp.cs8   # ensemble, services, sub-channels
 cargo run --release -p decdab-cli -- info 11D --amp                   # the same, live
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Classic FM" -o out/x.wav   # a service to WAV, CPU per stage
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Virgin Radio" -o out/x.wav --mp2-conceal   # MP2: check the header and scale-factor CRCs, conceal what fails (the GUI has a checkbox in the service panel)
 cargo run --release -p decdab-gui                                     # the GUI
 cargo run --release -p decdab-gui -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --play "Classic FM" --screenshot out/x.png --after 10
-cargo run --release -p decdab-gui -- --block 11D --play Absolute       # live (needs the HackRF free)
+cargo run --release -p decdab-gui -- --block 11D --play Absolute       # live (needs the HackRF free; --radio airspy for the Airspy)
 cargo run --release -p decdab-gui -- CAPTURE --play SERVICE --fps 30 --record-video out/x.mp4 --record-from 5 --record-secs 12   # --bottom scopes|channel|guide|sfn|none (channel: the sounder; guide: SPI schedules; sfn: TII); the GUI records its own frames (ffmpeg on PATH); scripts/promo makes the promo from such clips
 cargo run --release -p decdab-engine --example threshold -- captures/11a_long_216.928MHz_4.096Msps_amp.cs8 "absolute 80" 12 -12 -10 -8 -6   # MER where decoding breaks
 cargo run --release -p decdab-ofdm --example sound_probe -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8   # the sounder's rows: common phase step and power, row by row (frame-periodic faults show here)
@@ -65,5 +70,5 @@ time.
   and after on a capture (`decdab decode` prints per-stage CPU).
 - **Never commit** IQ captures, decoded audio, built exes or reference clones.
 - When Python edits source files, open them with `encoding='utf-8'`.
-- The HackRF may be in use by the user's own DecDVB-T app; ask before
+- The HackRF (and the Airspy) may be in use by the user's own DecDVB-T app; ask before
   taking it unless the user has handed it over.

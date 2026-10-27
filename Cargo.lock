@@ -696,7 +696,10 @@ name = "decdab-io"
 version = "0.2.0"
 dependencies = [
  "decdab-core",
+ "decdab-dsp",
  "num-complex",
+ "nusb",
+ "rustfft",
  "seify-hackrfone",
  "thiserror 2.0.21",
  "tracing",

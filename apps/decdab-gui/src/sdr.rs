@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 
 use crate::prefs;
-use crate::source::Gains;
+use crate::source::{AirspyGains, Gains};
 
 /// Baseband filter bandwidths the radio has that are worth offering, MHz.
 pub const FILTERS_MHZ: [f32; 5] = [1.75, 2.5, 3.5, 5.0, 6.0];
@@ -332,6 +332,8 @@ impl Optimiser {
 pub struct SdrView<'a> {
     pub settings: &'a mut SdrSettings,
     pub gains: &'a mut Gains,
+    /// The Airspy's gains, when that is the radio (`None`: the HackRF).
+    pub air_gains: Option<&'a mut AirspyGains>,
     pub live: bool,
     pub front_end: FrontEndReading,
     pub optimiser: Option<&'a Optimiser>,
@@ -343,6 +345,7 @@ pub struct SdrView<'a> {
 #[derive(Default)]
 pub struct SdrAsks {
     pub gains_changed: bool,
+    pub air_gains_changed: bool,
     pub optimise: bool,
     pub cancel: bool,
     pub reset: bool,
@@ -364,11 +367,33 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
     let SdrView {
         settings,
         gains,
+        air_gains,
         live,
         front_end,
         optimiser,
         last_result,
     } = v;
+    if let Some(g) = air_gains {
+        ui.add_enabled_ui(live, |ui| air_gain_body(ui, g, asks));
+        if !live {
+            ui.label(RichText::new("The radio's settings apply to a live Airspy.").weak());
+        }
+        samples_body(ui, settings, front_end);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "The Airspy has no baseband filter or frequency correction to set; the \
+                 gain optimiser is the HackRF's.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        if ui.button("Defaults").clicked() {
+            asks.reset = true;
+        }
+        return;
+    }
     ui.add_enabled_ui(live, |ui| {
         ui.label(RichText::new("Gain").strong());
         egui::Grid::new("sdr_gain").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
@@ -427,34 +452,7 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
         ui.label(RichText::new("The radio's settings apply to a live HackRF.").weak());
     }
 
-    ui.add_space(6.0);
-    ui.label(RichText::new("Samples").strong());
-    ui.checkbox(&mut settings.dc_removal, "DC removal")
-        .on_hover_text(
-            "Takes the radio's DC offset (the spike at the centre of the band) off the samples. \\n             It costs nothing.",
-        );
-    ui.label(
-        RichText::new(format!("    offset now {:.0} dBFS", front_end.dc_dbfs))
-            .small()
-            .weak(),
-    );
-    ui.checkbox(&mut settings.iq_balance, "I/Q balance")
-        .on_hover_text(
-            "Takes the mirror image the radio's I and Q paths leave across the centre of the \\n             band off the samples (blind, from the signal's circularity). A pass over every \\n             sample, about 1 % of a core.",
-        );
-    ui.label(
-        RichText::new(format!(
-            "    image {:.0} dB under the signal{}",
-            front_end.image_rejection_db,
-            if front_end.image_rejection_db < 40.0 && !settings.iq_balance {
-                " — worth turning on"
-            } else {
-                ""
-            }
-        ))
-        .small()
-        .weak(),
-    );
+    samples_body(ui, settings, front_end);
 
     ui.add_space(6.0);
     ui.add_enabled_ui(live, |ui| {
@@ -496,6 +494,94 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
     if ui.button("Defaults").clicked() {
         asks.reset = true;
     }
+}
+
+/// The sample-processing switches, which are the same for any radio.
+fn samples_body(ui: &mut Ui, settings: &mut SdrSettings, front_end: FrontEndReading) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Samples").strong());
+    ui.checkbox(&mut settings.dc_removal, "DC removal")
+        .on_hover_text(
+            "Takes the radio's DC offset (the spike at the centre of the band) off the samples. \\n             It costs nothing.",
+        );
+    ui.label(
+        RichText::new(format!("    offset now {:.0} dBFS", front_end.dc_dbfs))
+            .small()
+            .weak(),
+    );
+    ui.checkbox(&mut settings.iq_balance, "I/Q balance")
+        .on_hover_text(
+            "Takes the mirror image the radio's I and Q paths leave across the centre of the \\n             band off the samples (blind, from the signal's circularity). A pass over every \\n             sample, about 1 % of a core.",
+        );
+    ui.label(
+        RichText::new(format!(
+            "    image {:.0} dB under the signal{}",
+            front_end.image_rejection_db,
+            if front_end.image_rejection_db < 40.0 && !settings.iq_balance {
+                " — worth turning on"
+            } else {
+                ""
+            }
+        ))
+        .small()
+        .weak(),
+    );
+}
+
+/// The Airspy's three gain stages and libairspy's presets.
+fn air_gain_body(ui: &mut Ui, g: &mut AirspyGains, asks: &mut SdrAsks) {
+    ui.label(RichText::new("Gain").strong());
+    let before = *g;
+    egui::Grid::new("sdr_air_gain")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("LNA");
+            ui.add(egui::DragValue::new(&mut g.lna).range(0..=14).speed(0.1));
+            ui.end_row();
+            ui.label("Mixer");
+            ui.add(egui::DragValue::new(&mut g.mixer).range(0..=15).speed(0.1));
+            ui.end_row();
+            ui.label("VGA");
+            ui.add(egui::DragValue::new(&mut g.vga).range(0..=15).speed(0.1));
+            ui.end_row();
+        });
+    air_presets(ui, g);
+    asks.air_gains_changed |= *g != before;
+}
+
+/// The preset buttons: libairspy's sensitivity and linearity tables, 0–21.
+pub fn air_presets(ui: &mut Ui, g: &mut AirspyGains) {
+    ui.horizontal(|ui| {
+        ui.label("preset");
+        for (name, make, hint) in [
+            (
+                "sensitivity",
+                AirspyGains::sensitivity as fn(u8) -> AirspyGains,
+                "Best noise figure for each total gain.",
+            ),
+            (
+                "linearity",
+                AirspyGains::linearity as fn(u8) -> AirspyGains,
+                "Best resistance to strong signals for each total gain.",
+            ),
+        ] {
+            egui::ComboBox::from_id_salt(("air_preset", name))
+                .selected_text(name)
+                .width(96.0)
+                .show_ui(ui, |ui| {
+                    for n in (0..=21u8).rev().step_by(3) {
+                        if ui.selectable_label(false, format!("{name} {n}")).clicked() {
+                            *g = make(n);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(format!(
+                    "{hint} 21 is the most gain, 0 the least; 15 is the default."
+                ));
+        }
+    });
 }
 
 /// Figure of merit against total gain: the points, a line through them and the
