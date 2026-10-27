@@ -13,9 +13,10 @@ name = "decdab"
 path = "src/main.rs"
 
 [features]
-default = ["hackrf", "airspy"]
+default = ["hackrf", "airspy", "rtlsdr"]
 hackrf = ["decdab-io/hackrf"]
 airspy = ["decdab-io/airspy"]
+rtlsdr = ["decdab-io/rtlsdr"]
 
 [dependencies]
 decdab-core = { path = "../../crates/decdab-core" }

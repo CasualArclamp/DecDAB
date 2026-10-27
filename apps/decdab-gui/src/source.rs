@@ -1,6 +1,6 @@
 // made by CasualArclamp
-//! Opening a source and running the engine on it: the HackRF or the Airspy at
-//! a block, or a recorded IQ file.
+//! Opening a source and running the engine on it: the HackRF, the Airspy or
+//! an RTL-SDR at a block, or a recorded IQ file.
 
 use std::path::PathBuf;
 
@@ -10,6 +10,9 @@ use decdab_io::{IqFileReader, IqSource, format_from_path};
 
 /// The Airspy's three gain stages (indices, with libairspy's presets).
 pub use decdab_io::AirspyGains;
+
+/// The RTL-SDR's tuner gain (its AGC, or a fixed step).
+pub use decdab_io::RtlGains;
 
 /// The HackRF's three gain stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,11 @@ pub enum Spec {
         rate_hz: f64,
         gains: AirspyGains,
     },
+    /// Always 2.048 MS/s.
+    RtlSdr {
+        center_hz: f64,
+        gains: RtlGains,
+    },
     File {
         path: PathBuf,
         center_hz: f64,
@@ -66,6 +74,7 @@ pub struct Session {
     pub live: bool,
     set_gains: Option<GainSetter>,
     set_air_gains: Option<AirGainSetter>,
+    set_rtl_gains: Option<Setter<RtlGains>>,
     set_filter: Option<Setter<Option<f32>>>,
     set_ppm: Option<Setter<f32>>,
 }
@@ -107,6 +116,7 @@ impl Session {
                     rx,
                     live: true,
                     set_air_gains: None,
+                    set_rtl_gains: None,
                     set_gains: Some(Box::new(move |g| {
                         ctl.set_gains(decdab_io::HackRfGains {
                             amp: g.amp,
@@ -157,12 +167,49 @@ impl Session {
                     set_air_gains: Some(Box::new(move |g| {
                         ctl.set_gains(g).map_err(|e| e.to_string())
                     })),
+                    set_rtl_gains: None,
                     set_filter: None,
                     set_ppm: None,
                 })
             }
             #[cfg(not(feature = "airspy"))]
             Spec::Airspy { .. } => Err("built without the airspy feature".into()),
+            #[cfg(feature = "rtlsdr")]
+            Spec::RtlSdr { center_hz, gains } => {
+                use decdab_io::{RtlSdrSource, RtlSettings};
+                // The frequency correction follows from the SDR window, as
+                // the HackRF's does.
+                let src = RtlSdrSource::open(RtlSettings {
+                    center_hz: center_hz.round() as u64,
+                    gains: *gains,
+                    ..RtlSettings::default()
+                })
+                .map_err(|e| e.to_string())?;
+                let ctl = src.control();
+                let (probe, ppm_ctl) = (ctl.clone(), ctl.clone());
+                let rx = Rx::start(
+                    Box::new(src),
+                    opts,
+                    Some(Box::new(move || probe.overflows())),
+                );
+                // The tuner's IF filter follows the rate: no baseband filter
+                // to choose.
+                Ok(Session {
+                    rx,
+                    live: true,
+                    set_gains: None,
+                    set_air_gains: None,
+                    set_rtl_gains: Some(Box::new(move |g| {
+                        ctl.set_gains(g).map_err(|e| e.to_string())
+                    })),
+                    set_filter: None,
+                    set_ppm: Some(Box::new(move |ppm| {
+                        ppm_ctl.set_ppm(f64::from(ppm)).map_err(|e| e.to_string())
+                    })),
+                })
+            }
+            #[cfg(not(feature = "rtlsdr"))]
+            Spec::RtlSdr { .. } => Err("built without the rtlsdr feature".into()),
             Spec::File {
                 path,
                 center_hz,
@@ -178,6 +225,7 @@ impl Session {
                     live: false,
                     set_gains: None,
                     set_air_gains: None,
+                    set_rtl_gains: None,
                     set_filter: None,
                     set_ppm: None,
                 })
@@ -190,7 +238,7 @@ impl Session {
         self.set_filter.as_ref().map_or(Ok(()), |f| f(mhz))
     }
 
-    /// The HackRF's frequency error, ppm; no-op for a file.
+    /// The HackRF's or RTL-SDR's frequency error, ppm; no-op for a file.
     pub fn set_ppm(&self, ppm: f32) -> Result<(), String> {
         self.set_ppm.as_ref().map_or(Ok(()), |f| f(ppm))
     }
@@ -198,6 +246,11 @@ impl Session {
     /// Change the Airspy's gains (no-op for anything else).
     pub fn set_air_gains(&self, g: AirspyGains) -> Result<(), String> {
         self.set_air_gains.as_ref().map_or(Ok(()), |f| f(g))
+    }
+
+    /// Change the RTL-SDR's gain (no-op for anything else).
+    pub fn set_rtl_gains(&self, g: RtlGains) -> Result<(), String> {
+        self.set_rtl_gains.as_ref().map_or(Ok(()), |f| f(g))
     }
 
     /// Change the HackRF's gains (no-op for anything else).

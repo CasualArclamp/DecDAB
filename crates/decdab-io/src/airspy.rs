@@ -21,22 +21,21 @@
 //! [`IqSource::read`] (`airspy_dsp`), and hands the buffers back to the reader
 //! to be used again, so nothing is allocated per transfer.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{JoinHandle, Thread};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use decdab_core::{Error, Iq, Result};
-use nusb::transfer::{ControlIn, ControlOut, ControlType, Queue, Recipient, RequestBuffer};
+use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 
 use crate::IqSource;
 use crate::airspy_dsp::{IqConverter, RawStream};
 use crate::airspy_proto::{
     self as proto, AirspyGains, AirspySettings, CommandData, ENDPOINT_IN, Step, UsbCommand,
 };
+use crate::usb::{BulkReader, block_on_timeout};
 
 /// Bulk transfers kept in flight: ~50 ms of samples at 6.5 ms each.
 const IN_FLIGHT: usize = 8;
@@ -45,41 +44,9 @@ const IN_FLIGHT: usize = 8;
 const QUEUE: usize = 64;
 /// A control transfer that takes longer than this has hung.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
-/// How often the reader looks at its stop flag while waiting for data.
-const POLL: Duration = Duration::from_millis(100);
-/// Polls without a completed transfer before the reader gives up.
-const STALL_POLLS: u32 = 20;
 
 fn map_err(e: impl std::fmt::Display) -> Error {
     Error::Other(format!("Airspy: {e}"))
-}
-
-/// Wakes a thread parked in [`block_on_timeout`].
-struct Unpark(Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-/// Wait for a future on this thread, for at most `timeout`. Rust note: nusb
-/// hands out `Future`s, and a future does nothing until it is polled with a
-/// `Waker` that says how to wake the poller; this one unparks the thread.
-/// (`futures_lite::block_on`, as the HackRF driver uses, cannot give up.)
-/// The future is dropped on a timeout, which cancels the transfer.
-fn block_on_timeout<F: Future>(fut: F, timeout: Duration) -> Option<F::Output> {
-    let mut fut = std::pin::pin!(fut);
-    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
-            return Some(v);
-        }
-        let left = deadline.checked_duration_since(Instant::now())?;
-        std::thread::park_timeout(left);
-    }
 }
 
 /// The USB device: what the control handle and the reader thread share.
@@ -283,70 +250,6 @@ pub struct AirspySource {
     thread: Option<JoinHandle<()>>,
 }
 
-/// Wait for the queue's next transfer to complete, for at most `timeout`.
-/// `Queue::poll_next` panics with nothing pending, so there must be.
-fn next_complete(
-    queue: &mut Queue<RequestBuffer>,
-    timeout: Duration,
-) -> Option<nusb::transfer::Completion<Vec<u8>>> {
-    block_on_timeout(queue.next_complete(), timeout)
-}
-
-/// The reader thread: keeps the transfers in flight and hands each completed
-/// one on.
-fn reader(
-    dev: Arc<Inner>,
-    tx: SyncSender<Vec<u8>>,
-    recycled: Receiver<Vec<u8>>,
-    stop: Arc<AtomicBool>,
-    overflows: Arc<AtomicU64>,
-    transfer: usize,
-) {
-    let mut queue = dev.interface.bulk_in_queue(ENDPOINT_IN);
-    // Buffers that were dropped for want of room in the channel come back
-    // here.
-    let mut spare: Vec<Vec<u8>> = Vec::new();
-    for _ in 0..IN_FLIGHT {
-        queue.submit(RequestBuffer::new(transfer));
-    }
-    let mut idle = 0;
-    while !stop.load(Ordering::Relaxed) {
-        let Some(done) = next_complete(&mut queue, POLL) else {
-            idle += 1;
-            if idle >= STALL_POLLS {
-                tracing::warn!("Airspy delivered nothing for {:?}", POLL * STALL_POLLS);
-                break;
-            }
-            continue;
-        };
-        idle = 0;
-        if let Err(e) = done.status {
-            tracing::warn!("Airspy read failed: {e}");
-            break;
-        }
-        // The next transfer goes in before this one is handed on, so the radio
-        // never waits.
-        let fresh = recycled.try_recv().ok().or_else(|| spare.pop());
-        queue.submit(RequestBuffer::reuse(fresh.unwrap_or_default(), transfer));
-        match tx.try_send(done.data) {
-            Ok(()) => {}
-            Err(TrySendError::Full(b)) => {
-                overflows.fetch_add(1, Ordering::Relaxed);
-                spare.push(b);
-            }
-            Err(TrySendError::Disconnected(_)) => break,
-        }
-    }
-    // Cancelled transfers still come back through the queue.
-    queue.cancel_all();
-    while queue.pending() > 0 {
-        if next_complete(&mut queue, Duration::from_millis(500)).is_none() {
-            break;
-        }
-    }
-    let _ = dev.stop_rx();
-}
-
 impl AirspySource {
     /// Open the first Airspy, configure it and start receiving.
     pub fn open(settings: AirspySettings) -> Result<Self> {
@@ -368,9 +271,23 @@ impl AirspySource {
         let thread = {
             let (dev, stop, overflows) =
                 (Arc::clone(&dev), Arc::clone(&stop), Arc::clone(&overflows));
+            let reader = BulkReader {
+                interface: dev.interface.clone(),
+                endpoint: ENDPOINT_IN,
+                in_flight: IN_FLIGHT,
+                transfer,
+                tx,
+                recycled: recycle_rx,
+                stop,
+                overflows,
+                what: "Airspy",
+            };
             std::thread::Builder::new()
                 .name("airspy-rx".into())
-                .spawn(move || reader(dev, tx, recycle_rx, stop, overflows, transfer))
+                .spawn(move || {
+                    reader.run();
+                    let _ = dev.stop_rx();
+                })
                 .map_err(|e| Error::Other(format!("cannot start the Airspy reader: {e}")))?
         };
 
@@ -451,6 +368,7 @@ impl Drop for AirspySource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn rejects_what_is_wrong_before_any_usb_access() {
@@ -468,19 +386,6 @@ mod tests {
             let e = AirspySource::open(s).err().expect("must fail").to_string();
             assert!(!e.contains("no Airspy"), "{e}");
         }
-    }
-
-    #[test]
-    fn a_future_that_never_finishes_times_out() {
-        let t0 = Instant::now();
-        assert!(
-            block_on_timeout(std::future::pending::<()>(), Duration::from_millis(50)).is_none()
-        );
-        assert!(t0.elapsed() < Duration::from_secs(1));
-        assert_eq!(
-            block_on_timeout(std::future::ready(7), Duration::from_secs(1)),
-            Some(7)
-        );
     }
 
     /// Live: `cargo test -p decdab-io --release --features airspy live_airspy -- --ignored --nocapture`.

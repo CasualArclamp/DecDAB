@@ -258,3 +258,36 @@ out of it: the firmware version read returns a shorter reply than asked
   is not identified.
 - The GUI has no band scan window or history panel.
 - MP2's header and ScF CRCs are checked only with the "repair MP2 errors" switch on (off by default); the 3 LSBs of a scale factor and the sample bits are unprotected, so damage there still plays as it is.
+
+## 2026-10-27 — RTL-SDR front end
+
+**Built without a dongle.** A third live front end: RTL2832U + R820T/R820T2/R828D
+(RTL-SDR Blog V3/V4 and the like), in pure Rust over USB (`nusb`, no librtlsdr /
+libusb / DLLs): `decdab-io` `rtlsdr_proto.rs` (both chips as a driver over a
+bus trait, the PLL / filter / gain sums standing alone), `rtlsdr.rs` (the device
+on `nusb`, the control handle, `rtlsdr_info()`), behind the `rtlsdr` feature
+(default-on in the CLI and GUI). The Airspy's `block_on_timeout` and bulk reader
+moved to a shared `usb.rs`, and `RawStream` takes any `RawToIq` converter; the
+Airspy behaves as before (its tests pass unchanged). CLI: `--radio rtlsdr`,
+`--rtl-gain DB|agc`, `--rtl-ppm`, `decdab rtlsdr`, captures as `.cu8`. GUI:
+"RTL-SDR" in the Source combo, 2.048 MS/s fixed, AGC + gain step, ppm in the SDR
+window, remembered. Design in DESIGN.md §7.
+
+**Verified offline** (`cargo test`, `clippy -D warnings`, against a mock dongle
+that keeps the tuner's registers as written): the resampler ratio (exactly
+2.048 MS/s), the FIR's 12-bit packing, the IF filter for 2.048 (0x0b = 0xaf,
+IF 1.625 MHz) and wider/narrower bandwidths, the PLL within 55 Hz of the wanted
+LO at every 16 kHz over 174–240 MHz (×16 and ×8 dividers) and its register
+encoding, every one of the 29 gain steps reached exactly, the IF and ppm
+register values; the bring-up end to end on an R820T, a plain R828D and a V4
+(tuner registers for 11D: PLL, RF filters, IF filter, calibration code, gain;
+the demodulator's inversion, ratio and IF), retune and ppm moving the PLL, AGC,
+standby and power-down, an unknown tuner refused, the bias-tee pin never driven
+high. The GUI was run with no dongle (the control row and SDR window show the
+RTL-SDR's controls; opening reports none found).
+
+**Not verified:** anything on a real dongle. The register sequences are
+written out from librtlsdr from memory of its source, not checked against a
+USB trace; the first live test is
+`cargo test --release -p decdab-io --features rtlsdr live_rtlsdr -- --ignored --nocapture`,
+then `decdab info 11D --radio rtlsdr`.

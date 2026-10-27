@@ -1,8 +1,8 @@
 <!-- made by CasualArclamp -->
 # DecDAB — Design
 
-A Rust **DAB / DAB+** receiver (and matching modulator) for a **HackRF One**
-or an **Airspy R2**, with IQ-file replay. The sibling of DecDVB-T: the same crate shapes, the same
+A Rust **DAB / DAB+** receiver (and matching modulator) for a **HackRF One**,
+an **Airspy R2** or an **RTL-SDR**, with IQ-file replay. The sibling of DecDVB-T: the same crate shapes, the same
 GUI look (spectrum and waterfall with the tuning, the signal card and
 services on the right, scopes along the bottom, the statistics bar).
 
@@ -39,7 +39,7 @@ core for a whole receiver with audio:
 | Decoding | **One service played, all listed**: FIC for the whole ensemble, only the chosen sub-channel through FEC. |
 | Standards | ETSI EN 300 401 (DAB), TS 102 563 (DAB+), EN 301 234 (MOT), TS 101 499 (slideshow), TS 102 818 / 102 371 (SPI), TS 102 979 (Journaline), TS 101 756 (tables), ISO/IEC 11172-3 and 13818-3 (Layer II). Mode I only (Band III). |
 | Region | **UK Band III** (5A–13F). The roof aerial is UHF-filtered, so Band III is weak: `--amp --lna 40 --vga 20`. |
-| Front end | **HackRF One** (live), **Airspy R2** (live; added 2026-10-27, §6), IQ files. |
+| Front end | **HackRF One** (live), **Airspy R2** (live; added 2026-10-27, §6), **RTL-SDR** with an R820T/R828D (live; added 2026-10-27, §7), IQ files. |
 | Repo | Local git; GitHub **CasualArclamp/DecDAB, public** (since 2026-10-24). |
 | Licence | GPL-3.0-or-later, `made by CasualArclamp` headers. FDK-AAC is under its own Fraunhofer licence (vendored, as in DecDRM). |
 
@@ -48,7 +48,7 @@ core for a whole receiver with audio:
 | Crate | What |
 |---|---|
 | `decdab-core` | Samples, errors, the Band III block plan, CRC-16, DAB charsets. |
-| `decdab-io` | HackRF and Airspy R2 (pure-Rust drivers), the Airspy's real-to-IQ converter, IQ files, WAV IQ. From DecDVB-T. |
+| `decdab-io` | HackRF, Airspy R2 and RTL-SDR (pure-Rust drivers), the Airspy's real-to-IQ converter, IQ files, WAV IQ. From DecDVB-T. |
 | `decdab-dsp` | FIR, DDC, resampler, AGC, DC. From DecDVB-T. |
 | `decdab-ofdm` | Mode I parameters, phase reference, frequency interleaver, the front-end decimator, the demodulator (null/PRS sync, CFO, DQPSK → soft bits). |
 | `decdab-fec` | Rate-1/4 K = 7 code, puncturing (FIC, EEP-A/B, UEP Table 31), block Viterbi, energy dispersal, time interleaving, RS(120,110). |
@@ -166,3 +166,49 @@ Airspy's gains, are remembered (keys `radio`, `air_lna`, `air_mixer`,
 protocol), 12-bit packing in the GUI (CLI only), frequency correction (the
 R2's TCXO is good to ~0.5 ppm), a `decdab-io` hardware-in-the-loop test other
 than the ignored `live_airspy`.
+
+## 7. RTL-SDR front end (2026-10-27)
+
+A third live radio: RTL2832U dongles with a Rafael Micro **R820T / R820T2 /
+R828D** tuner (the RTL-SDR Blog V3 and V4 and most dongles of the last
+decade), in `decdab-io` behind the `rtlsdr` feature (default-on in the CLI and
+GUI). Pure Rust over `nusb` like the Airspy: no librtlsdr, no libusb, no DLLs;
+on Windows the dongle must be on the WinUSB driver (Zadig), on Linux the DVB-T
+kernel driver is detached at open. The register sequences, tables and formulas
+are librtlsdr's (`librtlsdr.c`, `tuner_r82xx.c`, GPL-2.0-or-later) and, for the
+V4's input switching, the RTL-SDR Blog fork's; credited in the modules.
+
+| File | What |
+|---|---|
+| `rtlsdr_proto.rs` | The RTL2832U (baseband bring-up, FIR, resampler, IF, sample-clock correction, I2C repeater, FIFO reset) and the R82xx (init, IF-filter calibration, DVB-T system settings, RF mux, PLL, IF filter by bandwidth, gain, standby) as a driver over an `RtlBus` trait (vendor control out / in, sleep). The pure sums (`Pll`, `if_filter`, `resampler_ratio`, `gain_indices`, …) stand alone. No USB: run against a mock dongle in the tests. `U8ToIq`: the unsigned bytes to IQ, scaled as cu8. |
+| `rtlsdr.rs` | The device: `RtlBus` on `nusb`, the shared bulk reader (8 transfers of 64 KiB in flight, a queue of 64), `RtlSdrControl` (retune, gain, ppm, overflows), `RtlSdrSource: IqSource`, `rtlsdr_info()`. |
+| `usb.rs` | What the Airspy and RTL-SDR drivers share: `block_on_timeout` and the `BulkReader` thread (moved out of `airspy.rs`). `airspy_dsp::RawStream` takes any `RawToIq` converter now. |
+
+**Rate:** 2.048 MS/s only, which the RTL2832U makes exactly from 28.8 MHz (ratio
+0x0384_0000). 4.096 is beyond what the dongle streams (3.2 MS/s at most), so the
+CLI and GUI run it at 2.048 whatever rate is asked for. The R82xx's IF filter
+follows the rate as in librtlsdr: 2.05 MHz wide, the channel at a 1.625 MHz IF,
+the spectrum inverted back in the RTL2832U.
+
+**Gain:** the tuner's AGC, or librtlsdr's 29 manual steps (0–49.6 dB, the LNA
+and mixer raised in turn, the VGA fixed at 16.3 dB). Default 40.2 dB manual, a
+guess for a weak Band III aerial. **Frequency correction:** ppm, applied as
+librtlsdr does (the RTL2832U's sample-clock register and the tuner's PLL
+reference). **Bias tee:** GPIO 0 is driven low at open and never high (a test
+checks every GPO write).
+
+**RTL-SDR Blog V4** (found by its USB strings, `RTLSDRBlog` / `Blog V4`): its
+R828D runs from 28.8 MHz, not 16, and its inputs are switched by band (VHF for
+Band III) with its notch filters opened inside the FM band and Band III.
+
+**CLI:** `--radio rtlsdr`, `--rtl-gain DB|agc`, `--rtl-ppm`; `decdab rtlsdr`
+prints the dongle and its tuner; `capture --radio rtlsdr` writes the dongle's
+own bytes as `.cu8` (`..._2.048Msps_rtlsdr.cu8`). **GUI:** "RTL-SDR" in the
+Source combo; the rate shows 2.048 MS/s fixed; AGC and a gain step in the
+control row and the SDR window, with the frequency correction; `--radio
+rtlsdr`; the radio and its gain are remembered (keys `radio`, `rtl_agc`,
+`rtl_gain_db10`).
+
+**Not done:** other tuners (E4000, FC0012/13, FC2580: refused at open with a
+message), direct sampling, rates other than 2.048, the RTL2832U's digital AGC,
+the bias tee, offset tuning. **Untested on a dongle:** written without one.

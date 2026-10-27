@@ -14,11 +14,12 @@ name = "decdab-gui"
 path = "src/main.rs"
 
 [features]
-# The HackRF and Airspy drivers are pure Rust (no SDK, no DLLs), so they are on
+# The HackRF, Airspy and RTL-SDR drivers are pure Rust (no SDK, no DLLs), so they are on
 # by default.
-default = ["hackrf", "airspy"]
+default = ["hackrf", "airspy", "rtlsdr"]
 hackrf = ["decdab-io/hackrf"]
 airspy = ["decdab-io/airspy"]
+rtlsdr = ["decdab-io/rtlsdr"]
 
 [dependencies]
 decdab-core = { path = "../../crates/decdab-core" }

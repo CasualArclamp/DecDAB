@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::prefs;
-use crate::source::{AirspyGains, Gains};
+use crate::source::{AirspyGains, Gains, RtlGains};
 
 /// How long a change has to hold still before it is written.
 const SETTLE: Duration = Duration::from_millis(800);
@@ -30,9 +30,11 @@ pub struct Snapshot {
     pub file_source: bool,
     pub rate_khz: i64,
     pub gains: Gains,
-    /// The radio last used: the Airspy (else the HackRF), and its gains.
-    pub airspy: bool,
+    /// The radio last used ("hackrf", "airspy" or "rtlsdr"), and the
+    /// Airspy's and the RTL-SDR's gains.
+    pub radio: &'static str,
     pub air_gains: AirspyGains,
+    pub rtl_gains: RtlGains,
     /// The capture last opened, its centre and rate.
     pub file: String,
     pub file_centre_hz: i64,
@@ -53,10 +55,12 @@ impl Snapshot {
             // "source" keeps the two values older versions wrote and read; the
             // radio is a key of its own.
             ("source", if self.file_source { "file" } else { "hackrf" }),
-            ("radio", if self.airspy { "airspy" } else { "hackrf" }),
+            ("radio", self.radio),
             ("air_lna", &self.air_gains.lna.to_string()),
             ("air_mixer", &self.air_gains.mixer.to_string()),
             ("air_vga", &self.air_gains.vga.to_string()),
+            ("rtl_agc", b(self.rtl_gains.agc)),
+            ("rtl_gain_db10", &self.rtl_gains.db10.to_string()),
             ("rate_khz", &self.rate_khz.to_string()),
             ("lna", &self.gains.lna.to_string()),
             ("vga", &self.gains.vga.to_string()),
@@ -81,8 +85,9 @@ pub struct Saved {
     pub file_source: bool,
     pub rate_msps: Option<f64>,
     pub gains: Option<Gains>,
-    pub airspy: bool,
+    pub radio: Option<String>,
     pub air_gains: Option<AirspyGains>,
+    pub rtl_gains: Option<RtlGains>,
     pub file: Option<PathBuf>,
     pub file_centre_mhz: Option<f64>,
     pub file_rate_msps: Option<f64>,
@@ -117,6 +122,14 @@ impl Saved {
             (Some(lna), Some(mixer), Some(vga)) => Some(AirspyGains { lna, mixer, vga }.clamped()),
             _ => None,
         };
+        // The RTL-SDR's, snapped to its tuner's steps.
+        let rtl_gains = match (flag("rtl_agc"), prefs::number::<u16>("rtl_gain_db10")) {
+            (Some(agc), Some(db10)) => Some(RtlGains {
+                agc,
+                db10: RtlGains::nearest_step(db10),
+            }),
+            _ => None,
+        };
         let window = prefs::get("window").and_then(|v| {
             let (w, h) = v.split_once('x')?;
             let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
@@ -131,8 +144,9 @@ impl Saved {
             file_source: prefs::get("source").is_some_and(|v| v == "file"),
             rate_msps: prefs::number::<i64>("rate_khz").map(|k| k as f64 / 1e3),
             gains,
-            airspy: prefs::get("radio").is_some_and(|v| v == "airspy"),
+            radio: prefs::get("radio"),
             air_gains,
+            rtl_gains,
             file: prefs::get("file")
                 .filter(|f| !f.is_empty())
                 .map(PathBuf::from),
@@ -210,8 +224,9 @@ mod tests {
                 lna,
                 vga: 8,
             },
-            airspy: false,
+            radio: "hackrf",
             air_gains: AirspyGains::default(),
+            rtl_gains: RtlGains::default(),
             file: String::new(),
             file_centre_hz: 0,
             file_rate_khz: 10_000,

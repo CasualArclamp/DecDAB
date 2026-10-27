@@ -19,6 +19,9 @@ cargo run --release -p decdab-cli -- info 12B --radio airspy --airspy-preset sen
 cargo run --release -p decdab-cli -- capture 12B --radio airspy --seconds 10   # captures/12b_225.648MHz_4.096Msps_airspy.cs16
 cargo test --release -p decdab-io bench_converter -- --ignored --nocapture      # the Airspy's real-to-IQ chain: ns a sample, % of a core
 cargo test --release -p decdab-io --features airspy live_airspy -- --ignored --nocapture   # Airspy attached: 3 s stream, retune
+cargo run --release -p decdab-cli -- rtlsdr                           # RTL-SDR: the dongle and its tuner (R820T/R828D only)
+cargo run --release -p decdab-cli -- info 11D --radio rtlsdr --rtl-gain 40.2   # live from an RTL-SDR (always 2.048 MS/s; --rtl-gain agc, --rtl-ppm N)
+cargo test --release -p decdab-io --features rtlsdr live_rtlsdr -- --ignored --nocapture   # RTL-SDR attached: 3 s stream, retune
 cargo run --release -p decdab-cli -- info captures/12b_225.648MHz_4.096Msps_amp.cs8   # ensemble, services, sub-channels
 cargo run --release -p decdab-cli -- info 11D --amp                   # the same, live
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Classic FM" -o out/x.wav   # a service to WAV, CPU per stage
@@ -70,5 +73,5 @@ time.
   and after on a capture (`decdab decode` prints per-stage CPU).
 - **Never commit** IQ captures, decoded audio, built exes or reference clones.
 - When Python edits source files, open them with `encoding='utf-8'`.
-- The HackRF (and the Airspy) may be in use by the user's own DecDVB-T app; ask before
+- The HackRF (and the Airspy and RTL-SDR) may be in use by the user's own DecDVB-T app; ask before
   taking it unless the user has handed it over.

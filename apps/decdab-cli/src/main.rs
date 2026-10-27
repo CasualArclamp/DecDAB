@@ -11,8 +11,10 @@
 //! - `info`: lock to an ensemble (a capture or a block on the radio) and
 //!   list what its FIC says: label, services, sub-channels, the time.
 //! - `airspy`: what the Airspy says about itself (board, firmware, rates).
+//! - `rtlsdr`: which RTL-SDR is attached and its tuner.
 //!
-//! The radio is the HackRF One unless `--radio airspy` says otherwise.
+//! The radio is the HackRF One unless `--radio airspy` or `--radio rtlsdr`
+//! says otherwise.
 
 mod decode;
 mod info;
@@ -25,7 +27,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use decdab_core::channel::{BAND_III, block_at, parse_block, scan_blocks};
-use decdab_io::AirspyGains;
+use decdab_io::{AirspyGains, RtlGains};
 
 #[derive(Parser)]
 #[command(name = "decdab", version, about = "DAB / DAB+ receiver")]
@@ -61,12 +63,15 @@ enum Command {
     Decode(Box<decode::DecodeArgs>),
     /// What the Airspy says about itself: board, firmware, sample rates.
     Airspy,
+    /// Which RTL-SDR is attached, and its tuner.
+    Rtlsdr,
     /// Record a block ("12B") or a frequency in MHz from the radio.
     Capture {
         /// A Band III block ("12B") or a centre frequency in MHz.
         what: String,
         /// Sample rate, MS/s: 2.048 (DAB's own) or a multiple of it (4.096 and
-        /// 8.192 for the Airspy too).
+        /// 8.192 for the Airspy too). The RTL-SDR runs at 2.048 whatever this
+        /// says.
         #[arg(long, default_value_t = 4.096)]
         rate: f64,
         /// Seconds to record.
@@ -75,7 +80,8 @@ enum Command {
         #[command(flatten)]
         gains: Gains,
         /// Output file; by default captures/<block>_<MHz>MHz_<rate>Msps[_amp].cs8
-        /// (HackRF) or ..._airspy.cs16 (Airspy: 16-bit, it has 12 bits).
+        /// (HackRF), ..._airspy.cs16 (Airspy: 16-bit, it has 12 bits) or
+        /// ..._rtlsdr.cu8 (RTL-SDR: its own unsigned bytes).
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
@@ -88,10 +94,13 @@ pub enum Radio {
     Hackrf,
     /// Airspy R2 (also the original Airspy).
     Airspy,
+    /// RTL-SDR (RTL2832U with an R820T/R820T2/R828D tuner).
+    Rtlsdr,
 }
 
 /// The radio and its gains: `--lna/--vga/--amp` are the HackRF's, the
-/// `--airspy-*` ones the Airspy's. Unused by a file.
+/// `--airspy-*` ones the Airspy's, the `--rtl-*` ones the RTL-SDR's. Unused
+/// by a file.
 #[derive(clap::Args, Clone, Copy)]
 pub struct Gains {
     /// The radio for a live source.
@@ -122,6 +131,13 @@ pub struct Gains {
     /// Airspy: 12-bit packed transfers (30 instead of 40 MB/s on the USB).
     #[arg(long)]
     pub airspy_packed: bool,
+    /// RTL-SDR: the tuner's gain in dB (0–49.6, snapped to its steps), or
+    /// "agc".
+    #[arg(long, value_parser = RtlGains::parse, default_value = "40.2")]
+    pub rtl_gain: RtlGains,
+    /// RTL-SDR: the dongle's clock error, ppm (positive: it runs high).
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    pub rtl_ppm: f64,
 }
 
 impl Gains {
@@ -147,6 +163,7 @@ fn main() -> Result<()> {
         }
         Command::Scan { gains, dwell } => scan(gains, dwell),
         Command::Airspy => airspy_info(),
+        Command::Rtlsdr => rtlsdr_info(),
         Command::Decode(a) => decode::run(*a),
         Command::Info {
             source,
@@ -203,14 +220,31 @@ fn airspy_info() -> Result<()> {
     bail!("built without the airspy feature")
 }
 
+#[cfg(feature = "rtlsdr")]
+fn rtlsdr_info() -> Result<()> {
+    let i = decdab_io::rtlsdr_info()?;
+    println!("dongle    {}", i.product);
+    println!("tuner     {}", i.tuner.name());
+    println!("rate      2.048 MS/s (DecDAB runs it at DAB's own rate only)");
+    Ok(())
+}
+
+#[cfg(not(feature = "rtlsdr"))]
+fn rtlsdr_info() -> Result<()> {
+    bail!("built without the rtlsdr feature")
+}
+
 fn capture(what: &str, rate: f64, seconds: f64, g: Gains, out: Option<PathBuf>) -> Result<()> {
     use decdab_core::SampleFormat;
     use decdab_io::{IqFileWriter, IqSource};
     let hz = tuning(what)?;
-    // The HackRF's samples are 8-bit; the Airspy's are 12-bit, so 16.
+    let rate = source::live_rate(g.radio, rate);
+    // The HackRF's samples are 8-bit; the Airspy's are 12-bit, so 16; the
+    // RTL-SDR's are unsigned 8-bit, kept as they come.
     let (fmt, ext, tag) = match g.radio {
         Radio::Hackrf => (SampleFormat::Cs8, "cs8", if g.amp { "_amp" } else { "" }),
         Radio::Airspy => (SampleFormat::Cs16, "cs16", "_airspy"),
+        Radio::Rtlsdr => (SampleFormat::Cu8, "cu8", "_rtlsdr"),
     };
     let path = out.unwrap_or_else(|| {
         let block = block_at(hz).map_or("f".to_string(), |b| b.name.to_ascii_lowercase());
@@ -297,11 +331,11 @@ fn spectrum(src: &mut dyn decdab_io::IqSource, n: usize, secs: f64) -> Result<Ve
 
 fn scan(g: Gains, dwell: f64) -> Result<()> {
     use decdab_io::IqSource;
-    const RATE: f64 = 4.096;
-    const N: usize = 4096; // 1 kHz bins
+    const N: usize = 4096; // 1 kHz bins at 4.096 MS/s, 500 Hz at 2.048
     let blocks: Vec<_> = scan_blocks().collect();
-    let mut src = open(blocks[0].hz(), RATE, g)?;
-    let bin = RATE * 1e6 / N as f64;
+    let rate = source::live_rate(g.radio, 4.096);
+    let mut src = open(blocks[0].hz(), rate, g)?;
+    let bin = rate * 1e6 / N as f64;
     let band = |db: &[f32], lo: f64, hi: f64| -> f32 {
         // Mean power (linear) over |f| in [lo, hi) Hz, both sides, as dB.
         let (mut s, mut k) = (0f64, 0usize);

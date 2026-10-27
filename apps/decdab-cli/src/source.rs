@@ -1,6 +1,6 @@
 // made by CasualArclamp
-//! Opening what the commands read: an IQ file, or a radio (the HackRF or the
-//! Airspy) tuned to a block or a frequency.
+//! Opening what the commands read: an IQ file, or a radio (the HackRF, the
+//! Airspy or an RTL-SDR) tuned to a block or a frequency.
 
 use std::path::Path;
 
@@ -55,11 +55,21 @@ impl IqSource for Live {
     }
 }
 
+/// The rate a radio will really run at when `rate` (MS/s) is asked for: the
+/// RTL-SDR runs at 2.048 only (its USB side tops out near 3.2 MS/s).
+pub fn live_rate(radio: Radio, rate: f64) -> f64 {
+    match radio {
+        Radio::Rtlsdr => 2.048,
+        _ => rate,
+    }
+}
+
 /// Open the chosen radio at `hz` (Hz) and `rate` (MS/s).
 pub fn open_live(hz: f64, rate: f64, g: Gains) -> Result<Live> {
     match g.radio {
         Radio::Hackrf => open_hackrf(hz, rate, g),
         Radio::Airspy => open_airspy(hz, rate, g),
+        Radio::Rtlsdr => open_rtlsdr(hz, g),
     }
 }
 
@@ -108,6 +118,27 @@ fn open_airspy(_: f64, _: f64, _: Gains) -> Result<Live> {
     bail!("built without the airspy feature")
 }
 
+#[cfg(feature = "rtlsdr")]
+fn open_rtlsdr(hz: f64, g: Gains) -> Result<Live> {
+    use decdab_io::{RtlSdrSource, RtlSettings};
+    let src = RtlSdrSource::open(RtlSettings {
+        center_hz: hz.round() as u64,
+        gains: g.rtl_gain,
+        ppm: g.rtl_ppm,
+        ..RtlSettings::default()
+    })?;
+    let ctl = src.control();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || ctl.overflows()),
+    })
+}
+
+#[cfg(not(feature = "rtlsdr"))]
+fn open_rtlsdr(_: f64, _: Gains) -> Result<Live> {
+    bail!("built without the rtlsdr feature")
+}
+
 pub fn open(what: &str, gains: Gains) -> Result<Box<dyn IqSource>> {
     let p = Path::new(what);
     if p.exists() {
@@ -119,5 +150,5 @@ pub fn open(what: &str, gains: Gains) -> Result<Box<dyn IqSource>> {
         return Ok(Box::new(r));
     }
     let hz = crate::tuning(what)?;
-    Ok(open_live(hz, LIVE_RATE_MSPS, gains)?.into_source())
+    Ok(open_live(hz, live_rate(gains.radio, LIVE_RATE_MSPS), gains)?.into_source())
 }

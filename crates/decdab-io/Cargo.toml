@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "decdab-io"
-description = "DecDAB I/O: IQ file replay/record, the HackRF and Airspy front ends"
+description = "DecDAB I/O: IQ file replay/record, the HackRF, Airspy and RTL-SDR front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,12 @@ hackrf = ["dep:seify-hackrfone"]
 # use the WinUSB driver (Zadig). The protocol and the real-to-IQ converter
 # are plain code and are built (and tested) without the feature.
 airspy = ["dep:nusb"]
+# Live RTL-SDR (RTL2832U with an R820T/R820T2/R828D tuner: RTL-SDR Blog V3/V4
+# and most current dongles), pure Rust over USB (nusb) like the Airspy: no
+# librtlsdr, no libusb. On Windows the dongle must use the WinUSB driver
+# (Zadig); on Linux the kernel's DVB driver is detached when it opens. The
+# chips' logic is plain code, built and tested without the feature.
+rtlsdr = ["dep:nusb"]
 
 [dependencies]
 decdab-core = { path = "../decdab-core" }

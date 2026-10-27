@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 
 use crate::prefs;
-use crate::source::{AirspyGains, Gains};
+use crate::source::{AirspyGains, Gains, RtlGains};
 
 /// Baseband filter bandwidths the radio has that are worth offering, MHz.
 pub const FILTERS_MHZ: [f32; 5] = [1.75, 2.5, 3.5, 5.0, 6.0];
@@ -334,6 +334,8 @@ pub struct SdrView<'a> {
     pub gains: &'a mut Gains,
     /// The Airspy's gains, when that is the radio (`None`: the HackRF).
     pub air_gains: Option<&'a mut AirspyGains>,
+    /// The RTL-SDR's gain, when that is the radio.
+    pub rtl_gains: Option<&'a mut RtlGains>,
     pub live: bool,
     pub front_end: FrontEndReading,
     pub optimiser: Option<&'a Optimiser>,
@@ -346,6 +348,7 @@ pub struct SdrView<'a> {
 pub struct SdrAsks {
     pub gains_changed: bool,
     pub air_gains_changed: bool,
+    pub rtl_gains_changed: bool,
     pub optimise: bool,
     pub cancel: bool,
     pub reset: bool,
@@ -368,11 +371,46 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
         settings,
         gains,
         air_gains,
+        rtl_gains,
         live,
         front_end,
         optimiser,
         last_result,
     } = v;
+    if let Some(g) = rtl_gains {
+        ui.add_enabled_ui(live, |ui| {
+            ui.label(RichText::new("Gain").strong());
+            let before = *g;
+            rtl_gain_controls(ui, g);
+            asks.rtl_gains_changed |= *g != before;
+        });
+        if !live {
+            ui.label(RichText::new("The radio's settings apply to a live RTL-SDR.").weak());
+        }
+        samples_body(ui, settings, front_end);
+        ui.add_space(6.0);
+        ui.add_enabled_ui(live, |ui| {
+            ui.label(RichText::new("Radio").strong());
+            ui.horizontal(|ui| {
+                ui.label("frequency correction");
+                ppm_control(ui, &mut settings.ppm);
+            });
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(
+                "The tuner's IF filter follows the rate (2.05 MHz); the gain optimiser is \
+                 the HackRF's.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(6.0);
+        if ui.button("Defaults").clicked() {
+            asks.reset = true;
+        }
+        return;
+    }
     if let Some(g) = air_gains {
         ui.add_enabled_ui(live, |ui| air_gain_body(ui, g, asks));
         if !live {
@@ -526,6 +564,39 @@ fn samples_body(ui: &mut Ui, settings: &mut SdrSettings, front_end: FrontEndRead
         .small()
         .weak(),
     );
+}
+
+/// The frequency correction, ppm.
+fn ppm_control(ui: &mut Ui, ppm: &mut f32) {
+    ui.add(
+        egui::DragValue::new(ppm)
+            .range(-200.0..=200.0)
+            .speed(0.05)
+            .max_decimals(2)
+            .suffix(" ppm"),
+    )
+    .on_hover_text(
+        "The radio's clock error: positive if it runs high. The receiver follows the \
+         carrier whatever this is; it makes the frequency shown true.",
+    );
+}
+
+/// The RTL-SDR's tuner gain: its AGC, or one of the R82xx's 29 steps.
+pub fn rtl_gain_controls(ui: &mut Ui, g: &mut RtlGains) {
+    ui.checkbox(&mut g.agc, "AGC")
+        .on_hover_text("The tuner's own AGC on the LNA and mixer.");
+    ui.add_enabled_ui(!g.agc, |ui| {
+        egui::ComboBox::from_id_salt("rtl_gain")
+            .selected_text(format!("{:.1} dB", f32::from(g.db10) / 10.0))
+            .width(80.0)
+            .show_ui(ui, |ui| {
+                for s in decdab_io::rtlsdr_proto::GAINS_DB10.iter().rev() {
+                    ui.selectable_value(&mut g.db10, *s, format!("{:.1} dB", f32::from(*s) / 10.0));
+                }
+            })
+            .response
+            .on_hover_text("The LNA and mixer together; the VGA stays at 16.3 dB.");
+    });
 }
 
 /// The Airspy's three gain stages and libairspy's presets.

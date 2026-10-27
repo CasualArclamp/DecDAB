@@ -637,13 +637,38 @@ fn stage1(e: &[f32], o: &[f32], m: usize, wi: &mut [f32], wq: &mut [f32]) {
     }
 }
 
+/// What turns a radio's raw USB bytes into IQ: the Airspy's [`IqConverter`],
+/// or the RTL-SDR's plain unsigned bytes (`rtlsdr_proto::U8ToIq`).
+pub trait RawToIq: Send {
+    /// Append the samples `bytes` make to `out`.
+    fn process(&mut self, bytes: &[u8], out: &mut Vec<Iq>);
+    /// Forget the past (filters start afresh), after a retune.
+    fn reset(&mut self);
+    fn output_rate(&self) -> f64;
+}
+
+impl RawToIq for IqConverter {
+    // Rust note: inherent methods win over trait methods of the same name,
+    // so these call the converter's own and do not recurse.
+    fn process(&mut self, bytes: &[u8], out: &mut Vec<Iq>) {
+        self.process(bytes, out)
+    }
+    fn reset(&mut self) {
+        self.reset()
+    }
+    fn output_rate(&self) -> f64 {
+        self.output_rate()
+    }
+}
+
 /// Raw buffers from the radio's reader to the converter, and back again for
 /// re-use: everything between the USB thread and the engine that needs no
-/// USB, so it is tested with a fake reader.
-pub struct RawStream {
+/// USB, so it is tested with a fake reader. Rust note: `C = IqConverter` is a
+/// default type parameter, so the Airspy's `RawStream` needs no annotation.
+pub struct RawStream<C: RawToIq = IqConverter> {
     rx: Receiver<Vec<u8>>,
     recycle: Sender<Vec<u8>>,
-    conv: IqConverter,
+    conv: C,
     /// Buffers still to be thrown away after a retune.
     skip: u32,
     /// How long to wait for a buffer before calling the radio stalled.
@@ -651,11 +676,11 @@ pub struct RawStream {
     what: &'static str,
 }
 
-impl RawStream {
+impl<C: RawToIq> RawStream<C> {
     pub fn new(
         rx: Receiver<Vec<u8>>,
         recycle: Sender<Vec<u8>>,
-        conv: IqConverter,
+        conv: C,
         what: &'static str,
     ) -> Self {
         RawStream {
