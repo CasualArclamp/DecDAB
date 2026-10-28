@@ -11,3 +11,4 @@ rust-version.workspace = true
 [dependencies]
 decdab-fdk-sys = { path = "../decdab-fdk-sys" }
 thiserror.workspace = true
+rusty_mp3 = "1.0.5"

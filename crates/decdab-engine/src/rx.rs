@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use decdab_audio::{AudioHandle, AudioPlayer, OutputKind};
-use decdab_codecs::Pcm;
+use decdab_codecs::{Mp3Recorder, Pcm};
 use decdab_core::{Iq, SampleFormat};
 use decdab_data::pad::{DynamicLabel, PadEvent};
 use decdab_fic::{Ensemble, FicDecoder};
@@ -89,6 +89,8 @@ pub struct Stats {
     pub front_end: FrontEndReading,
     pub load: StageLoad,
     pub recording: Option<Recording>,
+    /// The selected service being encoded to an MP3 file, if any.
+    pub mp3_recording: Option<PathBuf>,
     pub error: Option<String>,
     /// The source is exhausted (a file played to its end).
     pub ended: bool,
@@ -125,6 +127,9 @@ pub enum Command {
     FrontEnd(FrontEndSettings),
     /// Start recording to this file (cs8), or stop with `None`.
     Record(Option<PathBuf>),
+    /// Record the selected service's decoded audio to this MP3 file, or stop
+    /// with `None`.
+    RecordMp3(Option<PathBuf>),
 }
 
 /// A slideshow picture (or another MOT object) from the playing service.
@@ -371,6 +376,7 @@ fn run(
     let mut total = 0u64;
     let mut tuning = 0u32;
     let mut writer: Option<(IqFileWriter, PathBuf, u64)> = None;
+    let mut mp3_writer: Option<(Mp3Recorder, PathBuf)> = None;
     let mut rx: Option<Receiver_> = None;
     let mut want_service: Option<u32> = None;
     let mut scopes_on = false;
@@ -409,6 +415,11 @@ fn run(
         loop {
             match cmds.try_recv() {
                 Ok(Command::Decode(vfo)) => {
+                    if let Some((w, _)) = mp3_writer.take()
+                        && let Err(e) = w.finish()
+                    {
+                        set_error(format!("MP3 recording: {e}"));
+                    }
                     rx = None;
                     if let Some(v) = vfo {
                         match new_rx(v, source.center_freq(), scopes_on, sounder.is_some(), tii_on) {
@@ -419,6 +430,12 @@ fn run(
                     *sh.dab.lock().unwrap() = DabOut::default();
                 }
                 Ok(Command::Select(sid)) => {
+                    if want_service != sid
+                        && let Some((w, _)) = mp3_writer.take()
+                        && let Err(e) = w.finish()
+                    {
+                        set_error(format!("MP3 recording: {e}"));
+                    }
                     want_service = sid;
                     if let Some(r) = &mut rx {
                         r.demod.set_scope_subchannel(None);
@@ -470,6 +487,11 @@ fn run(
                 }
                 Ok(Command::Retune(hz)) => match source.retune(hz) {
                     Ok(true) => {
+                        if let Some((w, _)) = mp3_writer.take()
+                            && let Err(e) = w.finish()
+                        {
+                            set_error(format!("MP3 recording: {e}"));
+                        }
                         tuning += 1;
                         settle = (SETTLE_S * rate) as u64;
                         sh.rows.lock().unwrap().clear();
@@ -496,6 +518,19 @@ fn run(
                         match IqFileWriter::create(&p, SampleFormat::Cs8) {
                             Ok(w) => writer = Some((w, p, 0)),
                             Err(e) => set_error(format!("cannot record to {}: {e}", p.display())),
+                        }
+                    }
+                }
+                Ok(Command::RecordMp3(path)) => {
+                    if let Some((w, _)) = mp3_writer.take()
+                        && let Err(e) = w.finish()
+                    {
+                        set_error(format!("MP3 recording: {e}"));
+                    }
+                    if let Some(p) = path {
+                        match Mp3Recorder::create(&p) {
+                            Ok(w) => mp3_writer = Some((w, p)),
+                            Err(e) => set_error(format!("cannot record MP3: {e}")),
                         }
                     }
                 }
@@ -641,6 +676,14 @@ fn run(
                         }
                     });
                     for p in pcm.drain(..) {
+                        if let Some((w, _)) = &mut mp3_writer
+                            && let Err(e) = w.push(&p)
+                        {
+                            set_error(format!("MP3 recording stopped: {e}"));
+                            if let Some((w, _)) = mp3_writer.take() {
+                                let _ = w.finish();
+                            }
+                        }
                         if let Some(pl) = &mut r.player {
                             let f: Vec<f32> =
                                 p.samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
@@ -765,8 +808,15 @@ fn run(
                 path: p.clone(),
                 bytes: *b,
             });
+            s.mp3_recording = mp3_writer.as_ref().map(|(_, p)| p.clone());
         }
     }
+    if let Some((w, _)) = mp3_writer.take()
+        && let Err(e) = w.finish()
+    {
+        set_error(format!("MP3 recording: {e}"));
+    }
+    sh.stats.lock().unwrap().mp3_recording = None;
 }
 
 /// At most this many SPI services are decoded at once (an ensemble usually

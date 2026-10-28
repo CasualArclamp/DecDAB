@@ -576,14 +576,14 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decdab-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "cpal",
 ]
 
 [[package]]
 name = "decdab-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -601,15 +601,16 @@ dependencies = [
 
 [[package]]
 name = "decdab-codecs"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-fdk-sys",
+ "rusty_mp3",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "decdab-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -617,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-data"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -625,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-dsp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
  "num-complex",
@@ -634,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-engine"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-audio",
  "decdab-codecs",
@@ -650,21 +651,21 @@ dependencies = [
 
 [[package]]
 name = "decdab-fdk-sys"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "decdab-fec"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
 ]
 
 [[package]]
 name = "decdab-fic"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -672,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-gui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "decdab-audio",
@@ -693,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-io"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
  "decdab-dsp",
@@ -707,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-msc"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -716,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-ofdm"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "decdab-core",
  "decdab-dsp",
@@ -2453,6 +2454,12 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rusty_mp3"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eda7c6c82285d2bc3f1e6aded40ca6f7572fe9eec77f18fb10efc1d03aed3877"
 
 [[package]]
 name = "same-file"

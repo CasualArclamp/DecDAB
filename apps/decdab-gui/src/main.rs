@@ -24,7 +24,9 @@ mod remember;
 mod scopes;
 mod sdr;
 mod services;
+mod session_log;
 mod sfn_view;
+mod snapshot;
 mod source;
 mod waterfall;
 
@@ -421,6 +423,8 @@ struct App {
     rows_due: std::collections::VecDeque<Row>,
     keeper: Option<remember::Keeper>,
     recorder: Option<recorder::Recorder>,
+    session_log: session_log::SessionLog,
+    snapshot: snapshot::Snapshot,
     radio: (Block, f64),
     /// The radio last used (HackRf, Airspy or RtlSdr): kept while a file is
     /// open.
@@ -524,6 +528,8 @@ impl App {
             rows_due: std::collections::VecDeque::new(),
             keeper: None,
             recorder: None,
+            session_log: session_log::SessionLog::default(),
+            snapshot: snapshot::Snapshot::default(),
             radio: (block, tune_hz),
             window_size: kept.window.unwrap_or((1400, 860)),
             opts,
@@ -1026,6 +1032,96 @@ impl App {
 
     // ---- recording ------------------------------------------------------
 
+    fn source_name(&self) -> &'static str {
+        match self.kind {
+            SourceKind::HackRf => "hackrf",
+            SourceKind::Airspy => "airspy",
+            SourceKind::RtlSdr => "rtlsdr",
+            SourceKind::File => "file",
+        }
+    }
+
+    fn snapshot_path(&self) -> PathBuf {
+        PathBuf::from("captures").join(format!(
+            "decdab-{}-{:.3}MHz-{}.png",
+            self.source_name(),
+            self.centre_hz / 1e6,
+            utc_stamp()
+        ))
+    }
+
+    /// Record only the playing service, as 192 kbit/s MP3.
+    fn toggle_mp3_record(&mut self) {
+        let Some(s) = &self.session else { return };
+        if let Some(path) = &self.stats.mp3_recording {
+            self.note = format!("MP3 saved to {}", path.display());
+            s.rx.send(Command::RecordMp3(None));
+            self.stats.mp3_recording = None;
+            return;
+        }
+        let Some(sid) = self.dab.playing else {
+            self.note = "play a DAB service before recording MP3".into();
+            return;
+        };
+        let name = self
+            .ensemble
+            .services
+            .get(&sid)
+            .map_or_else(String::new, |svc| svc.name());
+        let slug: String = name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let slug = slug.trim_matches('_');
+        let slug = if slug.is_empty() {
+            format!("sid-{sid:08X}")
+        } else {
+            slug.to_string()
+        };
+        let block =
+            block_at(self.centre_hz).map_or("f".to_string(), |b| b.name.to_ascii_lowercase());
+        let path = PathBuf::from("captures").join(format!(
+            "{block}_{:.3}MHz_{slug}_{sid:08X}_{}.mp3",
+            self.centre_hz / 1e6,
+            utc_stamp()
+        ));
+        self.note = format!("MP3 recording to {}", path.display());
+        s.rx.send(Command::RecordMp3(Some(path)));
+    }
+
+    /// F12 snapshots, and the session log's once-a-second row.
+    fn log_tick(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+            let path = self.snapshot_path();
+            self.snapshot.request(ctx, path);
+        }
+        if let Some(r) = self.snapshot.poll(ctx) {
+            self.note = match r {
+                Ok(p) => format!("snapshot saved to {}", p.display()),
+                Err(e) => e,
+            };
+        }
+        if !self.session_log.is_on() {
+            return;
+        }
+        let err = self.session_log.row(&session_log::Row {
+            source: self.source_name(),
+            center_hz: self.stats.center_hz,
+            rate_hz: self.stats.sample_rate,
+            locked: self.dab.locked,
+            mer_db: self.dab.mer_db,
+            fibs_ok: self.dab.fibs_ok,
+            fibs: self.dab.fibs,
+            sid: self.dab.playing,
+            rms_dbfs: self.stats.rms_dbfs,
+            dropped: self.stats.dropped,
+            description: &self.stats.describe,
+        });
+        if let Some(e) = err {
+            self.note = format!("session log stopped: {e}");
+        }
+    }
+
     fn recording(&self) -> bool {
         self.stats.recording.is_some()
     }
@@ -1408,6 +1504,49 @@ impl App {
                     self.toggle_record();
                 }
             }
+            if running && (self.stats.mp3_recording.is_some() || self.dab.playing.is_some()) {
+                let label = if self.stats.mp3_recording.is_some() {
+                    RichText::new("● MP3").color(RED)
+                } else {
+                    RichText::new("● MP3")
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Record only the playing service, as MP3")
+                    .clicked()
+                {
+                    self.toggle_mp3_record();
+                }
+            }
+            let log_label = if self.session_log.is_on() {
+                RichText::new("● Log").color(RED)
+            } else {
+                RichText::new("● Log")
+            };
+            if ui
+                .button(log_label)
+                .on_hover_text("Log reception (lock, MER, FIBs, level) once a second to a CSV")
+                .clicked()
+            {
+                if self.session_log.is_on() {
+                    let path = self.session_log.path().map(|p| p.display().to_string());
+                    self.session_log.stop();
+                    self.note = format!("session log saved to {}", path.unwrap_or_default());
+                } else {
+                    self.note = match self.session_log.start() {
+                        Ok(p) => format!("logging to {}", p.display()),
+                        Err(e) => e,
+                    };
+                }
+            }
+            if ui
+                .button("📷")
+                .on_hover_text("Save a window snapshot (F12)")
+                .clicked()
+            {
+                let path = self.snapshot_path();
+                self.snapshot.request(ui.ctx(), path);
+            }
             ui.separator();
             if ui
                 .selectable_label(self.sdr_open, "⚙ SDR")
@@ -1683,6 +1822,7 @@ impl eframe::App for App {
         self.remember(ctx);
         self.cpu_percent = self.cpu.poll();
         self.handle_screenshot(ctx);
+        self.log_tick(ctx);
         if let Some(r) = &mut self.recorder
             && r.tick(ctx, self.started)
         {

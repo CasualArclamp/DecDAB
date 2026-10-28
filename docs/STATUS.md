@@ -1,6 +1,22 @@
 <!-- made by CasualArclamp -->
 # DecDAB — Status
 
+## 2026-10-28 — 0.2.3: selected-service MP3, session log, snapshots
+
+Ported from a contributor's patches against 0.2.0 (OM5NA, issue #2); their
+Airspy half was dropped, as 0.2.1 already has a driver. The GUI gains:
+
+- **● MP3** records only the playing service as 192 kbit/s CBR MP3 under
+  `captures/` (block, frequency, service name, SId and UTC in the name). The
+  encoder (`rusty_mp3`, pure Rust) runs on its own thread, so the receiver
+  thread only queues PCM; a backlog drops blocks rather than stalling.
+  A service change, retune or new ensemble ends the file. Checked end to end
+  with `decdab-engine --example mp3_probe` (ffprobe reads the result).
+- **● Log** writes one CSV row a second (lock, MER, FIBs, level, drops).
+- **📷 / F12** saves a PNG of the window to `captures/`.
+
+Not tried on a live radio.
+
 ## 2026-10-24 — kickoff to live audio (M0, M1, M3, M4)
 
 **Front end.** `decdab scan --amp` found six ensembles from the London roof:

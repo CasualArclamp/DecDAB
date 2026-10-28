@@ -8,9 +8,11 @@
 pub mod aac;
 pub mod mp2;
 mod mp2_window;
+pub mod mp3_recording;
 
 pub use aac::AacDecoder;
 pub use mp2::Mp2Decoder;
+pub use mp3_recording::Mp3Recorder;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
