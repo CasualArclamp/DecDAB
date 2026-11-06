@@ -28,6 +28,7 @@ cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_am
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Virgin Radio" -o out/x.wav --mp2-conceal   # MP2: check the header and scale-factor CRCs, conceal what fails (the GUI has a checkbox in the service panel)
 cargo run --release -p decdab-gui                                     # the GUI
 cargo run --release -p decdab-gui -- captures/11d_long_222.064MHz_4.096Msps_amp.cs8 --play "Classic FM" --screenshot out/x.png --after 10
+cargo run --release -p decdab-gui -- captures/12b_225.648MHz_4.096Msps_amp.cs8 --simple --screen playing|scan --screenshot out/x.png --after 8   # simple mode (env DECDAB_SIMPLE_SCAN=1 starts its scan; a test run never writes prefs or stations.txt)
 cargo run --release -p decdab-gui -- --block 11D --play Absolute       # live (needs the HackRF free; --radio airspy for the Airspy)
 cargo run --release -p decdab-gui -- CAPTURE --play SERVICE --fps 30 --record-video out/x.mp4 --record-from 5 --record-secs 12   # --bottom scopes|channel|guide|sfn|none (channel: the sounder; guide: SPI schedules; sfn: TII); the GUI records its own frames (ffmpeg on PATH); scripts/promo makes the promo from such clips
 cargo run --release -p decdab-engine --example threshold -- captures/11a_long_216.928MHz_4.096Msps_amp.cs8 "absolute 80" 12 -12 -10 -8 -6   # MER where decoding breaks

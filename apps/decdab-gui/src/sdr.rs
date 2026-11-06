@@ -326,6 +326,204 @@ impl Optimiser {
     }
 }
 
+// ---- the Airspy's gain optimiser -----------------------------------------
+
+/// A setting the Airspy's optimiser tries: the gains it started with, or one
+/// of the presets, sensitivity (the best noise figure for its total gain) or
+/// linearity (the most headroom), 0–21.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AirPreset {
+    Kept(AirspyGains),
+    Sensitivity(u8),
+    Linearity(u8),
+}
+
+impl AirPreset {
+    pub fn gains(self) -> AirspyGains {
+        match self {
+            AirPreset::Kept(g) => g,
+            AirPreset::Sensitivity(n) => AirspyGains::sensitivity(n),
+            AirPreset::Linearity(n) => AirspyGains::linearity(n),
+        }
+    }
+
+    pub fn name(self) -> String {
+        match self {
+            AirPreset::Kept(g) => format!(
+                "the gains it had (LNA {} mixer {} VGA {})",
+                g.lna, g.mixer, g.vga
+            ),
+            AirPreset::Sensitivity(n) => format!("sensitivity {n}"),
+            AirPreset::Linearity(n) => format!("linearity {n}"),
+        }
+    }
+
+    /// The preset's index (none for the kept gains).
+    fn index(self) -> Option<u8> {
+        match self {
+            AirPreset::Kept(_) => None,
+            AirPreset::Sensitivity(n) | AirPreset::Linearity(n) => Some(n),
+        }
+    }
+}
+
+/// One Airspy preset tried.
+#[derive(Debug, Clone, Copy)]
+pub struct AirPoint {
+    pub preset: AirPreset,
+    pub mer: Option<f32>,
+    pub rms_dbfs: f32,
+    pub spoiled: bool,
+}
+
+/// Where the sensitivity walk starts, its step, and the presets' top index.
+const AIR_FIRST: u8 = 6;
+const AIR_STEP: u8 = 3;
+const PRESET_TOP: u8 = 21;
+
+/// The Airspy's three gain stages are indices with no dB scale, so rather
+/// than [`Optimiser`]'s total-and-split search this measures the gains it
+/// starts with (so it never leaves the radio worse), then walks the presets:
+/// the sensitivity ones upward in steps of 3 until the MER is past its peak or
+/// the level is too hot, then the linearity ones at the best index and either
+/// side of it (with a strong neighbour, linearity can win). Each point takes
+/// 2 s, as the HackRF's do; a run is about ten. The best is chosen as the
+/// HackRF's is: the top MER, and of those within [`NEAR_BEST_DB`] of it the
+/// coolest.
+pub struct AirOptimiser {
+    pub original: AirspyGains,
+    pub points: Vec<AirPoint>,
+    pub current: AirPreset,
+    queue: Vec<AirPreset>,
+    linearity: bool,
+    changed_at: Option<Instant>,
+    mer: (f32, u32),
+    samples: u32,
+    settle: Duration,
+    measure: Duration,
+}
+
+pub enum AirAction {
+    Wait,
+    Apply(AirspyGains),
+    /// Done: the best preset, or `None` (put the original gains back).
+    Finish(Option<AirPreset>),
+}
+
+impl AirOptimiser {
+    pub fn new(original: AirspyGains) -> AirOptimiser {
+        AirOptimiser::with_times(original, SETTLE, MEASURE)
+    }
+
+    fn with_times(original: AirspyGains, settle: Duration, measure: Duration) -> AirOptimiser {
+        AirOptimiser {
+            original,
+            points: Vec::new(),
+            current: AirPreset::Kept(original),
+            queue: Vec::new(),
+            linearity: false,
+            changed_at: None,
+            mer: (0.0, 0),
+            samples: 0,
+            settle,
+            measure,
+        }
+    }
+
+    pub fn done(&self) -> usize {
+        self.points.len()
+    }
+
+    pub fn best(&self) -> Option<AirPoint> {
+        self.best_of(true)
+    }
+
+    /// The best point, of all or of the presets only (`kept` false).
+    fn best_of(&self, kept: bool) -> Option<AirPoint> {
+        // A closure returning an iterator, so the filter is written once.
+        let ok = || {
+            self.points
+                .iter()
+                .filter(|p| !p.spoiled && p.mer.is_some() && (kept || p.preset.index().is_some()))
+        };
+        let top = ok().filter_map(|p| p.mer).max_by(f32::total_cmp)?;
+        ok().filter(|p| p.mer.is_some_and(|m| m >= top - NEAR_BEST_DB))
+            .min_by(|a, b| a.rms_dbfs.total_cmp(&b.rms_dbfs))
+            .copied()
+    }
+
+    /// As [`Optimiser::tick`], with presets for gains.
+    pub fn tick(&mut self, r: &Reading) -> AirAction {
+        let Some(t0) = self.changed_at else {
+            self.changed_at = Some(r.now);
+            return AirAction::Apply(self.current.gains());
+        };
+        let elapsed = r.now.saturating_duration_since(t0);
+        if elapsed < self.settle {
+            return AirAction::Wait;
+        }
+        if elapsed < self.settle + self.measure {
+            if let Some(m) = r.mer {
+                self.mer = (self.mer.0 + m, self.mer.1 + 1);
+            }
+            self.samples += 1;
+            return AirAction::Wait;
+        }
+        let locked = self.mer.1 * 2 >= self.samples.max(1);
+        let point = AirPoint {
+            preset: self.current,
+            mer: (locked && self.mer.1 > 0).then(|| self.mer.0 / self.mer.1 as f32),
+            rms_dbfs: r.rms_dbfs,
+            spoiled: r.clip_percent > CLIP_PERCENT || r.rms_dbfs > TOO_HOT_DBFS,
+        };
+        self.points.push(point);
+        (self.mer, self.samples, self.changed_at) = ((0.0, 0), 0, None);
+        if !self.linearity {
+            // The kept gains first, then the walk; the walk's peak is judged
+            // on its own points.
+            let Some(n) = point.preset.index() else {
+                self.current = AirPreset::Sensitivity(AIR_FIRST);
+                return AirAction::Wait;
+            };
+            let top = self.best_of(false).and_then(|b| b.mer);
+            let v: Vec<f32> = self
+                .points
+                .iter()
+                .filter(|p| !p.spoiled && p.preset.index().is_some())
+                .filter_map(|p| p.mer)
+                .collect();
+            let past_peak = match (top, v.len()) {
+                (Some(top), n) if n >= 3 => v[n - 2..].iter().all(|x| *x < top - PAST_PEAK_DB),
+                _ => false,
+            };
+            if !(point.spoiled || past_peak || n + AIR_STEP > PRESET_TOP) {
+                self.current = AirPreset::Sensitivity(n + AIR_STEP);
+                return AirAction::Wait;
+            }
+            let Some(b) = self.best_of(false).and_then(|p| p.preset.index()) else {
+                return AirAction::Finish(self.best().map(|p| p.preset));
+            };
+            self.queue = [
+                b.saturating_sub(AIR_STEP),
+                b,
+                (b + AIR_STEP).min(PRESET_TOP),
+            ]
+            .into_iter()
+            .map(AirPreset::Linearity)
+            .collect();
+            self.queue.dedup();
+            self.linearity = true;
+        }
+        match self.queue.pop() {
+            Some(p) => {
+                self.current = p;
+                AirAction::Wait
+            }
+            None => AirAction::Finish(self.best().map(|p| p.preset)),
+        }
+    }
+}
+
 // ---- the window -----------------------------------------------------------
 
 /// What the window edits and shows.
@@ -421,7 +619,7 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
         ui.label(
             RichText::new(
                 "The Airspy has no baseband filter or frequency correction to set; the \
-                 gain optimiser is the HackRF's.",
+                 gain is optimised over its presets after a scan in simple mode.",
             )
             .small()
             .weak(),
@@ -621,6 +819,59 @@ fn air_gain_body(ui: &mut Ui, g: &mut AirspyGains, asks: &mut SdrAsks) {
     asks.air_gains_changed |= *g != before;
 }
 
+/// The Airspy's gain as one slider over libairspy's presets (0–21) with the
+/// table beside it: linearity (the most headroom) or sensitivity (the best
+/// noise figure). Gains set stage by stage (the SDR window) that no preset
+/// matches show as "manual" at the nearest index; moving the slider or the
+/// table puts a preset back. `linear` is the table chosen.
+pub fn air_gain_slider(ui: &mut Ui, g: &mut AirspyGains, linear: &mut bool) {
+    let make = |lin: bool, n: u8| {
+        if lin {
+            AirspyGains::linearity(n)
+        } else {
+            AirspyGains::sensitivity(n)
+        }
+    };
+    let find = |lin: bool| (0..=PRESET_TOP).find(|&n| make(lin, n) == *g);
+    // The chosen table first; a match only in the other one switches to it.
+    let exact = match find(*linear) {
+        Some(n) => Some(n),
+        None => find(!*linear).inspect(|_| *linear = !*linear),
+    };
+    let mut n = exact.unwrap_or_else(|| {
+        let sum = |a: AirspyGains| i32::from(a.lna) + i32::from(a.mixer) + i32::from(a.vga);
+        (0..=PRESET_TOP)
+            .min_by_key(|&n| (sum(make(*linear, n)) - sum(*g)).abs())
+            .unwrap_or(15)
+    });
+    ui.label("gain");
+    let r = ui
+        .add(egui::Slider::new(&mut n, 0..=PRESET_TOP).show_value(true))
+        .on_hover_text(format!(
+            "LNA {} · mixer {} · VGA {}{}",
+            g.lna,
+            g.mixer,
+            g.vga,
+            if exact.is_none() {
+                " (set by hand)"
+            } else {
+                ""
+            }
+        ));
+    let mut lin = *linear;
+    ui.selectable_value(&mut lin, true, "linear")
+        .on_hover_text("Linearity: the most headroom for strong signals.");
+    ui.selectable_value(&mut lin, false, "sensitive")
+        .on_hover_text("Sensitivity: the best noise figure for weak signals.");
+    if exact.is_none() {
+        ui.label(RichText::new("manual").weak());
+    }
+    if r.changed() || lin != *linear {
+        *linear = lin;
+        *g = make(lin, n);
+    }
+}
+
 /// The preset buttons: libairspy's sensitivity and linearity tables, 0–21.
 pub fn air_presets(ui: &mut Ui, g: &mut AirspyGains) {
     ui.horizontal(|ui| {
@@ -763,6 +1014,59 @@ mod tests {
         let mer = 24.0 - 0.06 * (total - 52.0).powi(2) - 0.15 * (f32::from(g.lna) - 32.0).abs();
         let rms = -60.0 + 0.8 * total;
         (mer, rms, total >= 66.0)
+    }
+
+    /// A pretend Airspy: the MER peaks at index 15 (sensitivity half a dB
+    /// over linearity), and the level clips from 21.
+    fn air_radio(p: AirPreset) -> (f32, f32, bool) {
+        let p = match p {
+            AirPreset::Kept(_) => AirPreset::Sensitivity(9),
+            p => p,
+        };
+        let n = f32::from(p.index().expect("a preset"));
+        let bonus = if matches!(p, AirPreset::Sensitivity(_)) {
+            0.5
+        } else {
+            0.0
+        };
+        (
+            20.0 - 0.1 * (n - 15.0).powi(2) + bonus,
+            -50.0 + 1.5 * n,
+            n >= 21.0,
+        )
+    }
+
+    #[test]
+    fn the_airspy_walk_finds_the_peak() {
+        let mut o = AirOptimiser::with_times(
+            AirspyGains::sensitivity(9),
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        );
+        let mut now = Instant::now();
+        let mut applied = AirPreset::Kept(AirspyGains::sensitivity(9));
+        for _ in 0..4000 {
+            now += Duration::from_millis(5);
+            let (mer, rms, clip) = air_radio(applied);
+            let r = Reading {
+                now,
+                mer: Some(mer),
+                cn: None,
+                rms_dbfs: rms,
+                clip_percent: if clip { 1.0 } else { 0.0 },
+            };
+            match o.tick(&r) {
+                AirAction::Wait => {}
+                AirAction::Apply(_) => applied = o.current,
+                AirAction::Finish(best) => {
+                    assert_eq!(best, Some(AirPreset::Sensitivity(15)));
+                    assert!(matches!(o.points[0].preset, AirPreset::Kept(_)));
+                    assert!(o.done() <= 11, "{} points", o.done());
+                    return;
+                }
+            }
+        }
+        panic!("did not finish");
     }
 
     fn run(start: Gains) -> (Optimiser, Option<Gains>) {

@@ -74,6 +74,32 @@ playing service's **DLS text and slideshow**; the bottom panel holds
 symbol/TII) | **channel** | **history** | none; the statistics bar under it.
 Band III scan lists ensembles and services.
 
+**Simple mode** (2026-11-01, `apps/decdab-gui/src/simple.rs`): DecDAB as a
+plain radio, in the expert window's look ("Native", chosen from five mocked-up
+looks). **Simple** at the start of the top row switches; a strip along the top
+has Now playing / Stations & scan and **expert**. Now playing: the stations by
+ensemble on the left, the slideshow (or SPI logo), name, DL Plus title and
+artist and the DLS in the middle with prev/next, mute, volume and MP3 record;
+the clock (ensemble LTO) and the margin over the code's required MER on the
+right. The scan sweeps the 38 blocks with the receiver off (each block's
+in-band level over the gap beside it, as `decdab scan`; over 6 dB is a
+candidate), then locks each candidate until its labelled audio services hold
+2.5 s (12 s give-up); the list goes to `%APPDATA%\DecDAB\stations.txt`. After a
+full scan on a live HackRF or Airspy the gain optimiser runs on the ensemble
+with the best margin (2 s lock first, 12 s give-up), the radio keeps what it
+finds, then the station plays. The Airspy has its own optimiser
+(`sdr::AirOptimiser`): its stages are indices, so it measures the gains it
+had, walks the sensitivity presets up from 6 in steps of 3 until past the MER
+peak or too hot, then tries linearity at the best index and either side; the
+pick is the HackRF's rule (top MER, then the coolest within 0.3 dB). A
+capture cannot be retuned, so its scan reads its one ensemble.
+
+**Airspy gain in the expert window** (2026-11-01): one slider over the
+presets, 0–21, with **linear** / **sensitive** beside it (remembered as
+`air_linear`); gains set stage by stage in the SDR window show as "manual". While simple
+mode shows, the scopes, sounder and TII are off and the waterfall texture is
+not drawn.
+
 ## 4. Milestones
 
 - **M0** — workspace, copied crates, docs, git. *(done 2026-10-24)*

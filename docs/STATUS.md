@@ -307,3 +307,32 @@ written out from librtlsdr from memory of its source, not checked against a
 USB trace; the first live test is
 `cargo test --release -p decdab-io --features rtlsdr live_rtlsdr -- --ignored --nocapture`,
 then `decdab info 11D --radio rtlsdr`.
+
+## Simple mode (2026-11-01)
+
+Asked for: DecDVB-T's simple mode done over for DecDAB, with options to choose
+from; of five mocked-up looks (Kitchen Radio, Dashboard, Native, Big & Bold,
+Hi-Fi Tuner) the user picked **Native**. `apps/decdab-gui/src/simple.rs`,
+design in DESIGN.md §3. `--simple`, `--screen playing|scan`, env
+`DECDAB_SIMPLE_SCAN=1`. Prefs: `simple`, `simple_sid`, `simple_block`.
+
+**Verified on captures:** Now playing on 11D (Classic FM: DLS, MER 11.7 dB,
+margin +1.2 dB, HE-AAC v2) and 12B (logo in the slideshow's place); the scan of
+a capture reads its ensemble (12B: 14 stations) and goes back to playing; the
+expert window unchanged. CPU on 11D: 16 % with simple mode against 22 % for the
+expert window (no scopes, no waterfall texture).
+
+**Verified live (Airspy R2, 2026-11-01):** the sweep of all 38 blocks takes
+under 30 s; four blocks came out 9–13 dB over their gaps (the rest within
+±0.5 dB, one at 3.8 dB, under the 6 dB line), each locked in 3.4–4.1 s, 88
+stations in all, then it went back to playing. A test run logs the sweep's
+levels and each lock to stderr (`simple scan: …`).
+
+**Gain optimise after the scan** (asked for the same day): on the Airspy the
+strongest ensemble was 12B (12.8 dB MER at lock); 9 settings in about 20 s,
+best linearity 12 at 12.6 dB MER and -29 dBFS (the gains it had measured as
+well, so it never leaves the radio worse). The expert window's Airspy gain is
+now a slider over the presets with linear/sensitive beside it.
+
+**Not verified:** the HackRF (its optimiser is the existing one), and weak
+blocks near the 6 dB line.

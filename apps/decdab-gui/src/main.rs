@@ -26,6 +26,7 @@ mod sdr;
 mod services;
 mod session_log;
 mod sfn_view;
+mod simple;
 mod snapshot;
 mod source;
 mod waterfall;
@@ -81,6 +82,9 @@ struct Options {
     window: Option<String>,
     /// No sound (a screenshot or a test run).
     mute: bool,
+    /// Start in simple mode (`--simple`), on this screen (`--screen`).
+    simple: bool,
+    screen: Option<simple::Screen>,
     bottom_given: bool,
     fps_given: bool,
     decode_given: bool,
@@ -147,6 +151,8 @@ impl Options {
             play: None,
             window: None,
             mute: false,
+            simple: false,
+            screen: None,
             bottom_given: false,
             fps_given: false,
             decode_given: false,
@@ -191,6 +197,11 @@ impl Options {
                 "--window" => o.window = Some(value("sdr")?),
                 "--play" => o.play = Some(value("a service (SId or label)")?),
                 "--mute" => o.mute = true,
+                "--simple" => o.simple = true,
+                "--screen" => {
+                    let v = value("playing or scan")?;
+                    o.screen = Some(simple::Screen::parse(&v).ok_or("--screen: playing or scan")?);
+                }
                 "--decode" | "--no-decode" => {
                     o.decode = a == "--decode";
                     o.decode_given = true;
@@ -281,8 +292,8 @@ fn main() -> eframe::Result {
             eprintln!("decdab-gui: {e}");
             eprintln!(
                 "usage: decdab-gui [capture.cs8] [--block 12B] [--rate MSPS] [--play SERVICE] \
-                 [--radio hackrf|airspy|rtlsdr] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
-                 [--window sdr] [--mute] [--no-decode]"
+                 [--radio hackrf|airspy|rtlsdr] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|channel|guide|sfn|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
+                 [--window sdr] [--mute] [--no-decode] [--simple] [--screen playing|scan]"
             );
             std::process::exit(2);
         }
@@ -409,6 +420,11 @@ struct App {
     sdr_sent: Option<sdr::SdrSettings>,
     sdr_open: bool,
     optimiser: Option<sdr::Optimiser>,
+    /// The Airspy's (it walks the presets).
+    air_optimiser: Option<sdr::AirOptimiser>,
+    /// The Airspy's gain slider is over the linearity presets (else the
+    /// sensitivity ones).
+    air_linear: bool,
     opt_result: Option<String>,
     /// The display rate the engine was last told (it makes a waterfall row
     /// a frame), and the rows come but not yet shown: one goes on the
@@ -430,6 +446,8 @@ struct App {
     /// open.
     radio_kind: SourceKind,
     window_size: (u32, u32),
+    /// The plain-radio screens ([`simple`]).
+    simple: simple::Simple,
 }
 
 impl App {
@@ -521,6 +539,8 @@ impl App {
             sdr_sent: None,
             sdr_open: opts.window.as_deref() == Some("sdr"),
             optimiser: None,
+            air_optimiser: None,
+            air_linear: prefs::get("air_linear").as_deref() == Some("1"),
             opt_result: None,
             fps_sent: None,
             wf_rows: 0,
@@ -532,6 +552,14 @@ impl App {
             snapshot: snapshot::Snapshot::default(),
             radio: (block, tune_hz),
             window_size: kept.window.unwrap_or((1400, 860)),
+            simple: {
+                // A screenshot or video run shows simple mode only when asked.
+                let from_prefs = !opts.test_run() && prefs::get("simple").as_deref() == Some("1");
+                simple::Simple::new(
+                    opts.simple || from_prefs,
+                    opts.screen.unwrap_or(simple::Screen::Playing),
+                )
+            },
             opts,
         };
         if let Some(f) = app.opts.file.clone() {
@@ -729,8 +757,7 @@ impl App {
     /// switch is on, and to stop when it is not.
     fn sync_decoder(&mut self) {
         let Some(s) = &self.session else { return };
-        let want = self
-            .decode
+        let want = (self.decode && !self.simple.sweeping())
             .then(|| {
                 self.vfo_hz
                     .or((self.centre_hz > 0.0).then_some(self.centre_hz))
@@ -772,7 +799,7 @@ impl App {
     /// The sounder runs only while its panel shows.
     fn sync_sounder(&mut self) {
         let Some(s) = &self.session else { return };
-        let want = self.bottom == Bottom::Channel && self.decode;
+        let want = self.bottom == Bottom::Channel && self.decode && !self.simple.on;
         if want != self.sounder_sent {
             s.rx.send(Command::Sounder(want));
             self.sounder_sent = want;
@@ -785,7 +812,7 @@ impl App {
     /// TII is looked for only while the SFN panel shows.
     fn sync_tii(&mut self) {
         let Some(s) = &self.session else { return };
-        let want = self.bottom == Bottom::Sfn && self.decode;
+        let want = self.bottom == Bottom::Sfn && self.decode && !self.simple.on;
         if want != self.tii_sent {
             s.rx.send(Command::Tii(want));
             self.tii_sent = want;
@@ -797,7 +824,7 @@ impl App {
 
     fn sync_scopes(&mut self) {
         let Some(s) = &self.session else { return };
-        let want = self.bottom == Bottom::Scopes && self.decode;
+        let want = self.bottom == Bottom::Scopes && self.decode && !self.simple.on;
         if want != self.scopes_sent {
             s.rx.send(Command::Scopes(want));
             self.scopes_sent = want;
@@ -941,12 +968,8 @@ impl App {
     }
 
     fn start_optimiser(&mut self) {
-        if self.kind == SourceKind::Airspy {
-            self.note = "The gain optimiser is for the HackRF; the Airspy has presets".into();
-            return;
-        }
         if self.kind == SourceKind::RtlSdr {
-            self.note = "The gain optimiser is for the HackRF".into();
+            self.note = "The gain optimiser is for the HackRF and the Airspy".into();
             return;
         }
         if !self.session.as_ref().is_some_and(|s| s.live) {
@@ -954,7 +977,21 @@ impl App {
             return;
         }
         self.opt_result = None;
-        self.optimiser = Some(sdr::Optimiser::new(self.gains));
+        if self.kind == SourceKind::Airspy {
+            self.air_optimiser = Some(sdr::AirOptimiser::new(self.air_gains));
+        } else {
+            self.optimiser = Some(sdr::Optimiser::new(self.gains));
+        }
+    }
+
+    /// An optimiser is running, and how far it has got: settings tried and
+    /// the best MER so far.
+    fn optimising(&self) -> Option<(usize, Option<f32>)> {
+        if let Some(o) = &self.optimiser {
+            return Some((o.done(), o.best().and_then(|p| p.mer)));
+        }
+        let o = self.air_optimiser.as_ref()?;
+        Some((o.done(), o.best().and_then(|p| p.mer)))
     }
 
     fn cancel_optimiser(&mut self) {
@@ -963,16 +1000,58 @@ impl App {
             self.change_gains();
             self.opt_result = Some("cancelled".into());
         }
+        if let Some(o) = self.air_optimiser.take() {
+            self.air_gains = o.original;
+            self.change_air_gains();
+            self.opt_result = Some("cancelled".into());
+        }
+    }
+
+    fn air_optimise_tick(&mut self, reading: &sdr::Reading) {
+        let Some(o) = self.air_optimiser.as_mut() else {
+            return;
+        };
+        match o.tick(reading) {
+            sdr::AirAction::Wait => {}
+            sdr::AirAction::Apply(g) => {
+                self.air_gains = g;
+                self.change_air_gains();
+            }
+            sdr::AirAction::Finish(best) => {
+                let o = self.air_optimiser.take().expect("running");
+                self.air_gains = best.map_or(o.original, |p| p.gains());
+                self.change_air_gains();
+                self.opt_result = Some(match o.best() {
+                    Some(p) if best.is_some() => format!(
+                        "best: {}, {:.1} dB MER (level {:.0} dBFS), {} settings tried",
+                        p.preset.name(),
+                        p.mer.unwrap_or(0.0),
+                        p.rms_dbfs,
+                        o.done()
+                    ),
+                    _ => "nothing to measure (no lock, or clipping at every setting)".into(),
+                });
+            }
+        }
     }
 
     fn optimise_tick(&mut self) {
+        if self.session.is_none() {
+            self.optimiser = None;
+            self.air_optimiser = None;
+            return;
+        }
+        let reading = sdr::Reading {
+            now: Instant::now(),
+            mer: (self.dab.locked && self.dab.mer_db.is_finite()).then_some(self.dab.mer_db),
+            cn: None,
+            rms_dbfs: self.stats.rms_dbfs,
+            clip_percent: self.stats.clip_percent,
+        };
+        self.air_optimise_tick(&reading);
         let Some(o) = self.optimiser.as_mut() else {
             return;
         };
-        if self.session.is_none() {
-            self.optimiser = None;
-            return;
-        }
         let reading = sdr::Reading {
             now: Instant::now(),
             mer: (self.dab.locked && self.dab.mer_db.is_finite()).then_some(self.dab.mer_db),
@@ -1358,6 +1437,13 @@ impl App {
 
     fn control_rows(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Simple")
+                .on_hover_text("DecDAB as a plain radio: the stations, what is playing, a scan")
+                .clicked()
+            {
+                self.simple_set(true);
+            }
             let running = self.session.is_some();
             let live = self.kind.is_radio();
             let before = self.kind;
@@ -1426,15 +1512,14 @@ impl App {
 
                 ui.separator();
                 if self.kind == SourceKind::Airspy {
-                    // The Airspy's three stages are indices, not dB.
+                    // One slider over the presets (the three stages, which are
+                    // indices rather than dB, are in the SDR window).
                     let mut g = self.air_gains;
-                    ui.label("LNA");
-                    ui.add(egui::DragValue::new(&mut g.lna).range(0..=14).speed(0.1));
-                    ui.label("mixer");
-                    ui.add(egui::DragValue::new(&mut g.mixer).range(0..=15).speed(0.1));
-                    ui.label("VGA");
-                    ui.add(egui::DragValue::new(&mut g.vga).range(0..=15).speed(0.1));
-                    sdr::air_presets(ui, &mut g);
+                    let before = self.air_linear;
+                    sdr::air_gain_slider(ui, &mut g, &mut self.air_linear);
+                    if self.air_linear != before && self.keeper.is_some() {
+                        prefs::set("air_linear", if self.air_linear { "1" } else { "0" });
+                    }
                     if g != self.air_gains {
                         self.air_gains = g.clamped();
                         self.change_air_gains();
@@ -1809,6 +1894,7 @@ impl eframe::App for App {
             self.open_file(p);
         }
         self.take_rows(ctx);
+        self.simple_tick();
         self.sync_decoder();
         self.sync_play();
         self.sync_conceal();
@@ -1837,6 +1923,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t0 = Instant::now();
         self.frames += 1;
+        if self.simple.on {
+            self.simple_ui(ui);
+            self.frame_cost[1] += t0.elapsed();
+            return;
+        }
         egui::Panel::top("controls").show(ui, |ui| self.control_bar(ui));
         egui::Panel::bottom("receiver").show(ui, |ui| self.status_panel(ui));
         if self.bottom == Bottom::Scopes {
