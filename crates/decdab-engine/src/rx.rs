@@ -22,12 +22,16 @@ use decdab_data::pad::{DynamicLabel, PadEvent};
 use decdab_fic::{Ensemble, FicDecoder};
 use decdab_io::{IqFileWriter, IqSource};
 use decdab_ofdm::params::{CIF_BITS, CIFS, FIC_BITS};
-use decdab_ofdm::{Demod, Frontend, SOUND_ROW_S, SOUND_SPACING_HZ, Scope, TiiReport};
+use decdab_ofdm::{
+    Demod, Frontend, RADAR_BIN_M, RADAR_BINS, RADAR_PRE, RADAR_SLOT_S, SOUND_ROW_S,
+    SOUND_SPACING_HZ, Scope, TiiReport,
+};
 
 /// The guard interval, µs (504 samples at 2.048 MHz).
 const GUARD_US: f64 = 246.09375;
 
 use crate::delay_doppler::{ChannelHistory, DelayDoppler, FreqDoppler};
+use crate::radar::{RadarHistory, RangeDoppler};
 use crate::frontend::{FrontEnd, FrontEndReading, FrontEndSettings};
 use crate::meter::{Stage, StageLoad, StageMeter};
 use crate::data_service::DataServiceDecoder;
@@ -113,6 +117,10 @@ pub enum Command {
     /// Sound the channel (fading rows, the delay-Doppler and the
     /// frequency-Doppler maps) while on.
     Sounder(bool),
+    /// Passive radar while on: range–Doppler maps over a coherent
+    /// interval of this many slots (`radar::CPI_SLOTS` is about a second),
+    /// or off with `None`.
+    Radar(Option<usize>),
     /// The display's frame rate: the waterfall makes one row a frame, so it
     /// scrolls a row a frame; the receiver's results are handed over as
     /// often (between 10 and 30 times a second).
@@ -180,6 +188,8 @@ pub struct DabUpdate {
     pub fading: Vec<Vec<f32>>,
     pub map: Option<Arc<DelayDoppler>>,
     pub freq_map: Option<Arc<FreqDoppler>>,
+    /// The passive radar's newest map, when new.
+    pub radar: Option<Arc<RangeDoppler>>,
     /// The logos and schedules, when something has arrived since the last
     /// call.
     pub spi: Option<Arc<SpiStore>>,
@@ -195,6 +205,7 @@ struct DabOut {
     fading: Vec<Vec<f32>>,
     map: Option<Arc<DelayDoppler>>,
     freq_map: Option<Arc<FreqDoppler>>,
+    radar: Option<Arc<RangeDoppler>>,
     spi: Option<Arc<SpiStore>>,
     tii: Option<Arc<TiiReport>>,
 }
@@ -270,6 +281,7 @@ impl Rx {
             fading: std::mem::take(&mut o.fading),
             map: o.map.take(),
             freq_map: o.freq_map.take(),
+            radar: o.radar.take(),
             spi: o.spi.take(),
             tii: o.tii.take(),
         }
@@ -398,13 +410,30 @@ fn run(
     let mut sounder: Option<ChannelHistory> = None;
     let mut fading: Vec<Vec<f32>> = Vec::new();
     let mut maps_at = Instant::now();
+    // The passive radar: its slots of the last CPI, and whether a map is
+    // due.
+    let mut radar: Option<RadarHistory> = None;
+    let mut radar_due = false;
+    let new_radar = |cpi: usize| {
+        RadarHistory::new(
+            cpi,
+            RADAR_SLOT_S,
+            RADAR_BIN_M / 1000.0,
+            RADAR_BINS,
+            RADAR_BINS - RADAR_PRE,
+        )
+    };
     let set_error = |e: String| sh.stats.lock().unwrap().error = Some(e);
-    let new_rx = |vfo: f64, centre: f64, scopes: bool, sound: bool, tii: bool| match Receiver_::new(
-        vfo, centre, rate,
-    ) {
+    let new_rx = |vfo: f64,
+                  centre: f64,
+                  scopes: bool,
+                  sound: bool,
+                  tii: bool,
+                  radar: bool| match Receiver_::new(vfo, centre, rate) {
         Ok(mut r) => {
             r.demod.set_scopes(scopes);
             r.demod.set_sounding(sound);
+            r.demod.set_radar(radar);
             r.demod.set_tii(tii);
             Ok(r)
         }
@@ -422,7 +451,17 @@ fn run(
                     }
                     rx = None;
                     if let Some(v) = vfo {
-                        match new_rx(v, source.center_freq(), scopes_on, sounder.is_some(), tii_on) {
+                        if let Some(h) = &mut radar {
+                            h.clear();
+                        }
+                        match new_rx(
+                            v,
+                            source.center_freq(),
+                            scopes_on,
+                            sounder.is_some(),
+                            tii_on,
+                            radar.is_some(),
+                        ) {
                             Ok(r) => rx = Some(r),
                             Err(e) => set_error(e),
                         }
@@ -465,6 +504,13 @@ fn run(
                         r.demod.set_scopes(on);
                     }
                 }
+                Ok(Command::Radar(cpi)) => {
+                    radar = cpi.map(new_radar);
+                    radar_due = false;
+                    if let Some(r) = &mut rx {
+                        r.demod.set_radar(cpi.is_some());
+                    }
+                }
                 Ok(Command::Sounder(on)) => {
                     sounder = on.then(|| {
                         ChannelHistory::new(SOUND_SPACING_HZ, SOUND_ROW_S, GUARD_US)
@@ -497,7 +543,18 @@ fn run(
                         sh.rows.lock().unwrap().clear();
                         wf.clear();
                         if rx.is_some() {
-                            rx = new_rx(hz, hz, scopes_on, sounder.is_some(), tii_on).ok();
+                            rx = new_rx(
+                                hz,
+                                hz,
+                                scopes_on,
+                                sounder.is_some(),
+                                tii_on,
+                                radar.is_some(),
+                            )
+                            .ok();
+                            if let Some(h) = &mut radar {
+                                h.clear();
+                            }
                             if let Some(h) = &mut sounder {
                                 h.clear();
                             }
@@ -600,6 +657,11 @@ fn run(
                     }
                     if let Some(t) = f.tii {
                         new_tii = Some(Arc::new(t.clone()));
+                    }
+                    if let Some(h) = &mut radar
+                        && !f.radar.is_empty()
+                    {
+                        radar_due |= h.push_frame(f.radar);
                     }
                     if let Some(h) = &mut sounder
                         && !f.sound.is_empty()
@@ -762,6 +824,14 @@ fn run(
                     // A GUI that stops collecting does not make this grow.
                     let extra = o.fading.len().saturating_sub(300);
                     o.fading.drain(..extra);
+                }
+                if radar_due
+                    && let Some(h) = &mut radar
+                {
+                    radar_due = false;
+                    if let Some(m) = meter.time(Stage::Radar, || h.map()) {
+                        o.radar = Some(Arc::new(m));
+                    }
                 }
                 if let Some(h) = &mut sounder
                     && maps_at.elapsed() >= Duration::from_secs(1)

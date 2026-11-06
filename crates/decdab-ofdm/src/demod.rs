@@ -117,6 +117,10 @@ pub struct Frame<'a> {
     /// apart, k = −767, −765 … 767), [`SOUND_ROWS`] times a frame, while
     /// [`Demod::set_sounding`] is on; empty otherwise.
     pub sound: &'a [Vec<Iq>],
+    /// The passive radar's range profiles, one a symbol (the phase
+    /// reference and the 75 data symbols, [`SYMBOLS`] rows of
+    /// [`RADAR_BINS`]), while [`Demod::set_radar`] is on; empty otherwise.
+    pub radar: &'a [Vec<Iq>],
     /// The transmitters heard (TII), every [`TII_EVERY`] frames while
     /// [`Demod::set_tii`] is on.
     pub tii: Option<&'a TiiReport>,
@@ -131,6 +135,20 @@ pub const SOUND_ROWS: usize = 8;
 pub const SOUND_ROW_S: f64 = FRAME as f64 / SOUND_ROWS as f64 / SAMPLE_RATE;
 /// The spacing of a sounder row's samples, Hz (every other carrier).
 pub const SOUND_SPACING_HZ: f64 = 2000.0;
+
+/// Delay bins of a radar range profile, a sample (0.49 µs, [`RADAR_BIN_M`]
+/// of bistatic range) each: [`RADAR_PRE`] before the strongest path, the
+/// rest (470 µs) after it.
+pub const RADAR_BINS: usize = 1024;
+/// Bins of a profile before the strongest path (31 µs): an SFN's nearer
+/// transmitters can come before it.
+pub const RADAR_PRE: usize = 64;
+/// Bistatic range a delay bin, metres: c over the sample rate.
+pub const RADAR_BIN_M: f64 = 299_792_458.0 / SAMPLE_RATE;
+/// The radar's time slot: a frame's 76 symbols and its null, as 77 equal
+/// slots (the null is 104 samples longer than a symbol; the slots are off
+/// the symbols' true times by up to 51 µs, a 0.1 rad error at 300 Hz).
+pub const RADAR_SLOT_S: f64 = FRAME as f64 / (SYMBOLS + 1) as f64 / SAMPLE_RATE;
 
 enum State {
     Search,
@@ -171,9 +189,21 @@ pub struct Demod {
     sound_at: [usize; SOUND_ROWS],
     hest: Vec<Iq>,
     next_h: Vec<Iq>,
+    /// The frame's reference for the tracking's decisions.
+    h_ref: Vec<Iq>,
     /// Per carrier, the turn that moves delay 0 from the FFT window's start
     /// to the first path: e^{j2πk·ADVANCE/N}.
     sound_raw: Vec<(usize, Vec<Iq>)>,
+    /// The passive radar: on or off, each symbol's raw estimate at every
+    /// carrier, the window over the carriers, and the range profiles out.
+    radar_on: bool,
+    radar_raw: Vec<Vec<Iq>>,
+    radar_win: Vec<f32>,
+    radar: Vec<Vec<Iq>>,
+    /// Where the radar's tracked path is expected in the next frame's
+    /// phase reference (samples after the window's start), and how fast it
+    /// moves (samples a frame).
+    radar_track: Option<(f64, f64)>,
     /// The sample clock's drift against the signal's, samples a frame.
     drift: f64,
     scope: Scope,
@@ -252,7 +282,18 @@ impl Demod {
             }),
             hest: vec![Iq::default(); CARRIERS],
             next_h: vec![Iq::default(); CARRIERS],
+            h_ref: vec![Iq::default(); CARRIERS],
             sound_raw: Vec::new(),
+            radar_on: false,
+            radar_raw: Vec::new(),
+            radar_win: (0..CARRIERS)
+                .map(|i| {
+                    let x = (i as f64 + 0.5) / CARRIERS as f64;
+                    (0.5 - 0.5 * (std::f64::consts::TAU * x).cos()) as f32
+                })
+                .collect(),
+            radar: Vec::new(),
+            radar_track: None,
             drift: 0.0,
             scope: Scope::default(),
             err: vec![0.0; CARRIERS],
@@ -277,15 +318,131 @@ impl Demod {
     /// DAB has no pilots but the phase reference, once a frame, which is too
     /// seldom to see Doppler. So the estimate starts from the phase
     /// reference and follows the signal symbol by symbol, decision-directed
-    /// (as DecDRM's estimates are): each cell is decided against the last
-    /// estimate smoothed over neighbouring carriers, and the transfer
-    /// function is the cell over the decided point, turned so its delays
+    /// (as DecDRM's estimates are): each cell is decided against the phase
+    /// reference's channel, smoothed over neighbouring carriers and turned
+    /// by the common turn since, and the transfer function is the cell over
+    /// the decided point, turned so its delays
     /// count from the first path (the FFT window sits [`ADVANCE`] samples
     /// before it). The residual carrier offset is left in, so the estimate
     /// runs on smoothly from one frame's phase reference to the next (it is
     /// a few hertz at most: the map's whole picture sits that far off 0).
     pub fn set_sounding(&mut self, on: bool) {
         self.sounding = on;
+    }
+
+    /// Passive radar: each frame's [`Frame::radar`] range profiles.
+    ///
+    /// The reference is the signal itself, decided: each symbol's cells are
+    /// decided as the sounder decides them (see [`Demod::set_sounding`]),
+    /// and the cell over its decided point is the channel at that carrier
+    /// and moment, unsmoothed (the reciprocal filter of OFDM passive radar).
+    /// Its inverse FFT over the carriers is the impulse response: the
+    /// direct path, and every echo at its delay. The Doppler comes later,
+    /// over many symbols (`decdab_engine::radar`).
+    pub fn set_radar(&mut self, on: bool) {
+        self.radar_on = on;
+        if on && self.radar_raw.len() != SYMBOLS {
+            self.radar_raw = vec![vec![Iq::default(); CARRIERS]; SYMBOLS];
+            self.radar = vec![vec![Iq::default(); RADAR_BINS]; SYMBOLS];
+        }
+    }
+
+    /// The impulse response of symbol `l`'s raw estimate into `self.work`,
+    /// turned so a path at `delay` samples after the window's start is at
+    /// 0, windowed over the carriers (Hann: an echo's range sidelobes 31 dB
+    /// down rather than 13).
+    fn radar_response(&mut self, l: usize, delay: f64) {
+        let scale = 1.0 / CARRIERS as f32;
+        // e^{j2πk·delay/N} from k = −768, a carrier a step.
+        let w = std::f64::consts::TAU * delay / FFT as f64;
+        let step = Iq::from_polar(1.0, w as f32);
+        let mut ph = Iq::from_polar(1.0, (-768.0 * w).rem_euclid(std::f64::consts::TAU) as f32);
+        self.work.fill(Iq::default());
+        for (i, (h, &g)) in self.radar_raw[l].iter().zip(&self.radar_win).enumerate() {
+            let k = carrier_of(i);
+            if k == 1 {
+                ph *= step; // carrier 0 is not used
+            }
+            self.work[bin(k)] = h * ph * (g * scale);
+            ph *= step;
+        }
+        self.ifft
+            .process_with_scratch(&mut self.work, &mut self.scratch);
+    }
+
+    /// Where the tracked path is in the impulse response in `self.work`,
+    /// samples (between samples, from the log power of the peak and its
+    /// neighbours: a parabola, which the Hann-windowed peak nearly is):
+    /// the strongest within 4 samples of `near`, or the strongest of all
+    /// when there is no `near` or the path there has faded 20 dB under it.
+    fn radar_peak(&self, near: Option<f64>) -> f64 {
+        let n = FFT as i64;
+        let p = |d: i64| self.work[d.rem_euclid(n) as usize].norm_sqr();
+        let best = |r: std::ops::RangeInclusive<i64>| {
+            r.map(|d| (d, p(d)))
+                .fold((0, 0f32), |b, x| if x.1 > b.1 { x } else { b })
+        };
+        let all = best(-(n / 2)..=n / 2 - 1);
+        let (d, _) = match near {
+            Some(x) => {
+                let c = x.round() as i64;
+                let local = best(c - 4..=c + 4);
+                if local.1 * 100.0 >= all.1 { local } else { all }
+            }
+            None => all,
+        };
+        let (a, b, c) = (
+            p(d - 1).max(1e-30).ln(),
+            p(d).max(1e-30).ln(),
+            p(d + 1).max(1e-30).ln(),
+        );
+        let den = a - 2.0 * b + c;
+        let frac = if den < 0.0 {
+            (0.5 * (a - c) / den).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        };
+        d as f64 + frac as f64
+    }
+
+    /// The frame's range profiles from its raw estimates. Each is turned so
+    /// one path stays put: the strongest, its place in the phase
+    /// reference's response followed by an α–β tracker (a position and a
+    /// rate a frame: the sample clock's drift), so the turn runs on
+    /// smoothly within and across frames; a measurement's own wobble, let
+    /// through frame by frame, would modulate every echo at the frame rate
+    /// (lines at multiples of 10.4 Hz). The window's whole-sample steps are
+    /// known and taken out exactly. The path sits at bin [`RADAR_PRE`];
+    /// each profile is cut to [`RADAR_BINS`].
+    fn finish_radar(&mut self, window_step: i32) {
+        // Gains: about a second to follow, the rate slower still.
+        const ALPHA: f64 = 0.1;
+        const BETA: f64 = 0.005;
+        self.radar_response(0, 0.0);
+        let (pos, rate) = match self.radar_track {
+            Some((p, r)) => {
+                let meas = self.radar_peak(Some(p));
+                let e = meas - p;
+                // A jump (another path, a new lock) is taken at once.
+                if e.abs() > 2.0 {
+                    (meas, 0.0)
+                } else {
+                    (p + ALPHA * e, r + BETA * e)
+                }
+            }
+            None => (self.radar_peak(None), 0.0),
+        };
+        for l in 0..SYMBOLS {
+            // The symbol's middle, in frames from the phase reference's.
+            let t = (l * SYMBOL) as f64 / FRAME as f64;
+            self.radar_response(l, pos + rate * t);
+            let row = &mut self.radar[l];
+            row[..RADAR_PRE].copy_from_slice(&self.work[FFT - RADAR_PRE..]);
+            row[RADAR_PRE..].copy_from_slice(&self.work[..RADAR_BINS - RADAR_PRE]);
+        }
+        // Where it will be in the next frame, whose window starts
+        // `window_step` samples later.
+        self.radar_track = Some((pos + rate - window_step as f64, rate));
     }
 
     /// Keep a sounder row: the estimate at every other carrier, with the
@@ -414,6 +571,8 @@ impl Demod {
     /// Look for a frame in the buffer. Returns false when more samples are
     /// needed.
     fn acquire(&mut self) -> bool {
+        // A new lock: the radar's path is found afresh.
+        self.radar_track = None;
         let need = 2 * FRAME + NULL;
         if self.buf.len() < need {
             return false;
@@ -537,15 +696,27 @@ impl Demod {
         // The phase reference, and from it the impulse response.
         self.spectrum(sym(0));
         Self::carriers(&self.work, &mut self.prev);
-        if self.sounding {
+        let tracking = self.sounding || self.radar_on;
+        if tracking {
             self.sound_raw.clear();
             // The phase reference is known: the estimate starts exact.
             let p = prs_bins();
             for (i, (h, z)) in self.hest.iter_mut().zip(&self.prev).enumerate() {
                 *h = z * p[bin(carrier_of(i))].conj();
             }
-            if self.sound_at.contains(&0) {
+            if self.sounding && self.sound_at.contains(&0) {
                 self.push_sound_row(0);
+            }
+            if self.radar_on {
+                self.radar_raw[0].copy_from_slice(&self.hest);
+            }
+            // The frame's reference for deciding cells: the phase
+            // reference's channel averaged over five carriers (well inside
+            // the coherence bandwidth of any echo within the guard).
+            let n = self.hest.len();
+            for i in 0..n {
+                let (a, b) = (i.saturating_sub(2), (i + 3).min(n));
+                self.h_ref[i] = self.hest[a..b].iter().sum::<Iq>() / (b - a) as f32;
             }
         }
         if self.scopes_on {
@@ -661,6 +832,9 @@ impl Demod {
 
         // The data symbols.
         let mut cpe_sum = 0f64;
+        // The common turn since the phase reference, for the tracking's
+        // reference.
+        let mut turn = Iq::new(1.0, 0.0);
         let (mut err_acc, mut sig_acc) = (0f64, 0f64);
         for l in 1..SYMBOLS {
             self.spectrum(sym(l));
@@ -723,18 +897,20 @@ impl Demod {
                     }
                 }
             }
-            if self.sounding {
-                // Each cell decided coherently against the last estimate
-                // averaged over its neighbours (five carriers, well inside
-                // the coherence bandwidth of any echo within the guard), so
-                // a wrong decision is pulled back by them rather than
-                // carried on; the new estimate is the cell over the decided
-                // point (unit cells: z·x*).
+            if tracking {
+                // Each cell decided coherently against the frame's
+                // reference (the phase reference's channel, smoothed) turned
+                // by the common turn since (the residual offset, the symbols'
+                // turns `cpe` added up); the estimate is the cell over the
+                // decided point (unit cells: z·x*). Deciding against the
+                // last symbol's estimate instead let a wrong decision carry
+                // on: in a deep SFN fade a run of carriers would slip a
+                // quarter turn and stay slipped to the frame's end, the
+                // estimate worsening through every frame (0.5 dB off the
+                // direct path by its end) and the radar seeing lines at the
+                // frame rate.
+                turn *= Iq::from_polar(1.0, cpe);
                 let n = self.hest.len();
-                let mut acc = Iq::default();
-                for h in &self.hest[..2] {
-                    acc += h;
-                }
                 // The cells alternate between two constellations: the phase
                 // reference is on the axes and each symbol turns the last by
                 // ±45° or ±135° (EN 300 401 §14.5), so odd symbols are on the
@@ -742,14 +918,8 @@ impl Demod {
                 let diagonal = l % 2 == 1;
                 let q = std::f32::consts::FRAC_1_SQRT_2;
                 for i in 0..n {
-                    if i + 2 < n {
-                        acc += self.hest[i + 2];
-                    }
-                    if i >= 3 {
-                        acc -= self.hest[i - 3];
-                    }
                     let z = self.cur[i];
-                    let c = z * acc.conj();
+                    let c = z * (self.h_ref[i] * turn).conj();
                     let x = if diagonal {
                         Iq::new(q.copysign(c.re), q.copysign(c.im))
                     } else if c.re.abs() >= c.im.abs() {
@@ -760,8 +930,11 @@ impl Demod {
                     self.next_h[i] = z * x.conj();
                 }
                 std::mem::swap(&mut self.hest, &mut self.next_h);
-                if self.sound_at.contains(&l) {
+                if self.sounding && self.sound_at.contains(&l) {
                     self.push_sound_row(l);
+                }
+                if self.radar_on {
+                    self.radar_raw[l].copy_from_slice(&self.hest);
                 }
             }
             std::mem::swap(&mut self.cur, &mut self.prev);
@@ -794,12 +967,16 @@ impl Demod {
             if self.sounding {
                 self.finish_sound(step as f64);
             }
+            if self.radar_on {
+                self.finish_radar(step);
+            }
             on_frame(&Frame {
                 soft: &self.soft,
                 last_diff: &self.diff,
                 stats,
                 scope: self.scopes_on.then_some(&self.scope),
                 sound: if self.sounding { &self.sound } else { &[] },
+                radar: if self.radar_on { &self.radar } else { &[] },
                 tii: self.tii_report.as_ref(),
             });
             // Steer half the residual: the samples already buffered keep the

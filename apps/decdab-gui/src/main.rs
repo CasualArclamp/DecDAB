@@ -14,6 +14,7 @@
 mod band;
 mod card;
 mod channel_view;
+mod radar_view;
 mod freq_display;
 mod guide;
 mod logos;
@@ -101,6 +102,8 @@ enum Bottom {
     Guide,
     /// The SFN's transmitters (TII) and their delays.
     Sfn,
+    /// Passive radar: the range–Doppler map of what reflects the signal.
+    Radar,
     Hidden,
 }
 
@@ -111,6 +114,7 @@ impl Bottom {
             Bottom::Channel => "channel",
             Bottom::Guide => "guide",
             Bottom::Sfn => "sfn",
+            Bottom::Radar => "radar",
             Bottom::Hidden => "none",
         }
     }
@@ -121,6 +125,7 @@ impl Bottom {
             "channel" => Bottom::Channel,
             "guide" => Bottom::Guide,
             "sfn" => Bottom::Sfn,
+            "radar" => Bottom::Radar,
             "none" => Bottom::Hidden,
             _ => return None,
         })
@@ -190,7 +195,7 @@ impl Options {
                 "--bottom" => {
                     let v = value("scopes, channel or none")?;
                     o.bottom = Bottom::parse(&v).ok_or(format!(
-                        "--bottom: not scopes, channel, guide, sfn or none: {v}"
+                        "--bottom: not scopes, channel, guide, sfn, radar or none: {v}"
                     ))?;
                     o.bottom_given = true;
                 }
@@ -292,7 +297,7 @@ fn main() -> eframe::Result {
             eprintln!("decdab-gui: {e}");
             eprintln!(
                 "usage: decdab-gui [capture.cs8] [--block 12B] [--rate MSPS] [--play SERVICE] \
-                 [--radio hackrf|airspy|rtlsdr] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|channel|guide|sfn|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
+                 [--radio hackrf|airspy|rtlsdr] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|channel|guide|sfn|radar|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
                  [--window sdr] [--mute] [--no-decode] [--simple] [--screen playing|scan]"
             );
             std::process::exit(2);
@@ -351,6 +356,9 @@ struct App {
     /// The channel panel, and whether the engine was last told to sound.
     chan_view: channel_view::ChannelView,
     sounder_sent: bool,
+    radar_view: radar_view::RadarView,
+    /// The radar's coherent interval as last sent (`None`: off).
+    radar_sent: Option<usize>,
     /// The SFN panel, and whether the engine was last told to look for TII.
     sfn_view: sfn_view::SfnView,
     tii_sent: bool,
@@ -512,6 +520,8 @@ impl App {
             scopes_sent: false,
             chan_view: channel_view::ChannelView::default(),
             sounder_sent: false,
+            radar_view: radar_view::RadarView::default(),
+            radar_sent: None,
             sfn_view: sfn_view::SfnView::default(),
             tii_sent: false,
             stats: Stats::default(),
@@ -701,6 +711,8 @@ impl App {
                 self.note.clear();
                 (self.scopes_sent, self.sdr_sent, self.fps_sent) = (false, None, None);
                 self.sounder_sent = false;
+                self.radar_sent = None;
+                self.radar_view.reset();
                 self.tii_sent = false;
                 self.conceal_sent = false;
                 self.rows_due.clear();
@@ -806,6 +818,19 @@ impl App {
             if !want {
                 self.chan_view.reset();
             }
+        }
+    }
+
+    /// The radar runs only while its panel shows; a new coherent interval
+    /// starts it afresh.
+    fn sync_radar(&mut self) {
+        let Some(s) = &self.session else { return };
+        let on = self.bottom == Bottom::Radar && self.decode && !self.simple.on;
+        let want = on.then_some(self.radar_view.cpi);
+        if want != self.radar_sent {
+            s.rx.send(Command::Radar(want));
+            self.radar_sent = want;
+            self.radar_view.reset();
         }
     }
 
@@ -1247,6 +1272,9 @@ impl App {
             if self.bottom == Bottom::Channel {
                 self.chan_view.update(&mut u);
             }
+            if self.bottom == Bottom::Radar {
+                self.radar_view.update(&mut u);
+            }
             self.dab = u.status;
             if let Some(e) = u.ensemble {
                 self.ensemble = e;
@@ -1668,6 +1696,8 @@ impl App {
             ui.selectable_value(&mut self.bottom, Bottom::Channel, "channel");
             ui.selectable_value(&mut self.bottom, Bottom::Guide, "guide");
             ui.selectable_value(&mut self.bottom, Bottom::Sfn, "SFN");
+            ui.selectable_value(&mut self.bottom, Bottom::Radar, "radar")
+                .on_hover_text("passive radar: what reflects the ensemble's signal, by range and Doppler");
             ui.selectable_value(&mut self.bottom, Bottom::Hidden, "none");
             if self.bottom == Bottom::Channel {
                 egui::ComboBox::from_id_salt("doppler")
@@ -1900,6 +1930,7 @@ impl eframe::App for App {
         self.sync_conceal();
         self.sync_scopes();
         self.sync_sounder();
+        self.sync_radar();
         self.sync_tii();
         self.sync_sdr();
         self.sync_fps();
@@ -1966,6 +1997,16 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     ui.set_min_height(SCOPES_PANEL_H + 20.0);
                     self.chan_view.show(ui, status);
+                });
+        }
+        if self.bottom == Bottom::Radar {
+            let status = (self.decode && self.dab.locked).then(String::new);
+            let rf_hz = self.vfo_hz;
+            egui::Panel::bottom("radar")
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.set_min_height(SCOPES_PANEL_H + 60.0);
+                    self.radar_view.show(ui, status, rf_hz);
                 });
         }
         if self.bottom == Bottom::Sfn {

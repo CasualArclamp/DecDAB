@@ -238,3 +238,24 @@ rtlsdr`; the radio and its gain are remembered (keys `radio`, `rtl_agc`,
 **Not done:** other tuners (E4000, FC0012/13, FC2580: refused at open with a
 message), direct sampling, rates other than 2.048, the RTL2832U's digital AGC,
 the bias tee, offset tuning. **Untested on a dongle:** written without one.
+
+## 8. Passive radar (2026-11-05)
+
+- **Reference:** the received signal, decided (OFDM reciprocal filter): the
+  channel at each cell is the cell over its decided point; no second
+  receiver, so no interferometry (direction) and no surveillance antenna.
+- **Range:** the inverse FFT over the 1536 carriers: 0.65 µs resolution
+  (195 m), a bin a sample (146 m), 64 bins before the strongest path and
+  960 after (140 km). Range 0 is the strongest path.
+- **Doppler:** an FFT over a coherent interval of 385, 770 or 1540 slots
+  (0.5, 1, 2 s), 77 slots a frame (the null as one, filled from its
+  neighbours): ±401 Hz, covering an airliner's bistatic Doppler at Band III.
+- **Clutter:** each row turned and scaled by the direct path; each range
+  bin's mean taken out, in strong bins (25 dB over the typical) its mean per
+  slot of the frame.
+- **Costs** only while the panel shows: the profiles in the OFDM stage
+  (~2 % of a core), the maps in their own stage (`radar`, ~2.5 %).
+- **The panel:** Doppler ±50…±400 Hz, range 25…140 km, CPI, colour 0–15 or
+  0–25 dB over the floor, trails (points 12 dB over the floor, kept and
+  fading for 10 or 60 s); echoes 16 dB over the floor beyond ±15 Hz,
+  lettered on the map and listed with range, Doppler and bistatic speed.

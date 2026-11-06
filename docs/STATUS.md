@@ -336,3 +336,46 @@ now a slider over the presets with linear/sensitive beside it.
 
 **Not verified:** the HackRF (its optimiser is the existing one), and weak
 blocks near the 6 dB line.
+
+## Passive radar (2026-11-05)
+
+A **radar** panel: the range–Doppler map of what reflects the ensemble's
+signal (aircraft, traffic), Doppler across, bistatic range up, dB over the
+noise floor, as FM and DAB passive radars draw it. One receiver, no second
+channel: the reference is the signal itself, decided. `Demod::set_radar`
+keeps each symbol's channel estimate (cell over decided point, every
+carrier) and turns it into a range profile (Hann over the carriers, inverse
+FFT, 1024 bins of 146 m); `decdab_engine::radar` stacks ~1 s of them (77
+slots a frame, the null's filled from its neighbours), turns each by the
+direct path, takes out what stands still, and FFTs each range bin over time
+(±401 Hz in ~1 Hz). A map every 0.48 s; the panel lists the strongest echoes
+off the clutter ridge with their bistatic speed, and can leave trails.
+
+**Faults found on the way, on 11A (60 s):** (1) the window's whole-sample
+steps and the sample clock's drift made every path jump a bin every ~3.75 s:
+the radar now follows the strongest path with an α–β tracker (`finish_radar`);
+(2) a frame-locked pattern on the strong paths copied them at every multiple
+of 10.4 Hz: their per-slot mean is taken out (`STRONG_DB`); (3) **decisions
+against the last symbol's estimate slipped**: in a deep SFN fade a run of
+carriers would turn a quarter and stay turned to the frame's end, the
+estimate worsening through every frame (direct path 0.5 dB down by its end).
+Cells are now decided against the phase reference's channel turned by the
+common turn since. That was most of the clutter ridge (3.1 → 0.4 dB over the
+floor) and all of the vertical lines at the frame rate (+4.1 → −0.4 dB). The
+sounder uses the same estimates, so its maps are cleaner too.
+
+**Verified on captures:** 11A: floor −67…−71 dB under the direct path;
+aircraft tracks at 8, 29, 55 and 67 km, their Doppler drifting smoothly map
+to map (67 km: −18 → −27 Hz over 12 s). CPU: OFDM 5.3 % of a core with the
+radar's profiles, the maps 2.5 % (the GUI's `radar` stage); nothing while the
+panel is closed.
+
+**Then, from DecDVB-T's port (same day):** the floor is each Doppler
+column's median over range where that is higher, so whatever is the same at
+every range (a weak tone, the radio's DC; the faint −100 Hz line here) is flat;
+and echoes are not listed within 3 bins (0.4 km) of the direct path. Ridge
+0.1 dB over the floor on 11A.
+
+**Not verified:** live, and on a single-transmitter block. **Left:** range
+counts from the strongest path, which in an SFN need not be the nearest
+transmitter.

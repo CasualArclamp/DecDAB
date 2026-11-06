@@ -93,7 +93,7 @@ impl CpuGauge {
 }
 
 /// How many stages there are.
-pub const STAGES: usize = 8;
+pub const STAGES: usize = 9;
 
 /// The stages of the receive thread, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +116,9 @@ pub enum Stage {
     /// The ensemble's SPI data services (logos, the guide), in the
     /// background.
     Data,
+    /// The passive radar's range–Doppler maps (its range profiles are in
+    /// the OFDM stage).
+    Radar,
 }
 
 impl Stage {
@@ -128,6 +131,7 @@ impl Stage {
         Stage::Fic,
         Stage::Audio,
         Stage::Data,
+        Stage::Radar,
     ];
 
     pub fn name(self) -> &'static str {
@@ -140,6 +144,7 @@ impl Stage {
             Stage::Fic => "FIC",
             Stage::Audio => "audio",
             Stage::Data => "data",
+            Stage::Radar => "radar",
         }
     }
 }
