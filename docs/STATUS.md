@@ -1,6 +1,19 @@
 <!-- made by CasualArclamp -->
 # DecDAB — Status
 
+## 2026-11-11 — 0.3.0: simple mode, gain optimiser, passive radar, short X-PAD slides
+
+- **Simple mode** (`--simple`): a now-playing screen and a band scan.
+- **Airspy gain optimiser:** measures the starting gains, then walks the
+  sensitivity and linearity presets for the best MER.
+- **Passive radar** (`--bottom radar`): a range–Doppler map with the
+  ensemble as its own reference, an echo list and trails.
+- **Slides in short X-PAD:** the data group length indicator does not fit
+  in a 4-byte short X-PAD: 3 bytes sit beside the contents indicator and
+  the last comes in the next X-PAD. `PadDecoder` now gathers it, so those
+  stations' slides complete (EN 300 401 §7.4.5.1, TS 101 499). Checked on
+  air in DecLAB, which has the same `pad.rs`.
+
 ## 2026-10-28 — 0.2.3: selected-service MP3, session log, snapshots
 
 Ported from a contributor's patches against 0.2.0 (OM5NA, issue #2); their
