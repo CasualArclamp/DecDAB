@@ -14,7 +14,7 @@ cargo clippy --workspace --all-targets --release -- -D warnings
 cargo run --release -p decdab-cli -- blocks                           # the Band III plan
 cargo run --release -p decdab-cli -- scan --amp                       # HackRF: which blocks carry an ensemble
 cargo run --release -p decdab-cli -- capture 12B --amp --seconds 10   # captures/12b_225.648MHz_4.096Msps_amp.cs8
-cargo run --release -p decdab-cli -- airspy                           # Airspy R2: board, firmware, sample rates
+cargo run --release -p decdab-cli -- airspy                           # Airspy R2 (or Mini, which then runs at 6 MS/s): board, firmware, sample rates
 cargo run --release -p decdab-cli -- info 12B --radio airspy --airspy-preset sensitivity:15   # the same live, from the Airspy (--airspy-lna/-mixer/-vga, --airspy-packed)
 cargo run --release -p decdab-cli -- capture 12B --radio airspy --seconds 10   # captures/12b_225.648MHz_4.096Msps_airspy.cs16
 cargo test --release -p decdab-io bench_converter -- --ignored --nocapture      # the Airspy's real-to-IQ chain: ns a sample, % of a core

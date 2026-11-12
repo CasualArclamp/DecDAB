@@ -392,3 +392,16 @@ and echoes are not listed within 3 bins (0.4 km) of the direct path. Ridge
 **Not verified:** live, and on a single-transmitter block. **Left:** range
 counts from the strongest path, which in an SFN need not be the nearest
 transmitter.
+
+## Airspy Mini (2026-11-12)
+
+- The Airspy front end no longer needs 10 MS/s: it runs the board at the
+  listed rate nearest to it, which on an Airspy Mini (6 and 3 MS/s) is 6.
+- The converter takes its input rate (`IqConverter::for_input`): the load
+  stage and libairspy's half-band are the same at any rate, since the
+  firmware keeps the IF on fs/4. From 6 MS/s it puts one half-band before
+  the resampler for 2.048 MS/s, none for 4.096, and interpolates to 8.192.
+  The test sends tones as a Mini would (12 MS/s real, IF on 3 MHz) and
+  checks place, level, flatness over the ensemble and the alias.
+- Its CPU from 6 MS/s has not been measured (`bench_converter` is the R2's).
+- **Not run on a Mini.**

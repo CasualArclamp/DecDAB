@@ -46,6 +46,7 @@ download and run.
 |---|---|
 | HackRF One | Band III is often weak: try `--amp --lna 40 --vga 20`. |
 | Airspy R2 | Pure-Rust driver; libairspy-style gain presets (`--airspy-preset sensitivity:15`). |
+| Airspy Mini | The same driver and options (`--radio airspy`), run at 6 MS/s, the Mini's highest rate. Not yet tried on a real Mini. |
 | RTL-SDR | RTL2832U with an R820T/R820T2/R828D tuner, 2.048 MS/s. Less tested than the others. |
 | ADALM-PLUTO / Pluto+ | Pure-Rust driver over USB or the network (`--pluto-uri auto\|usb\|ip:ADDRESS`, `--pluto-gain 50\|agc`). Receive only. Not yet tried on a real Pluto. |
 | Fobos SDR | Needs RigExpert's `fobos_sdr.dll` (agile firmware) or `fobos.dll` (stock) beside the exe; runs at 8 MS/s. Not yet tried on the radio. |

@@ -92,7 +92,7 @@ enum Command {
 pub enum Radio {
     /// HackRF One.
     Hackrf,
-    /// Airspy R2 (also the original Airspy).
+    /// Airspy R2 (also the original Airspy, and an Airspy Mini at 6 MS/s).
     Airspy,
     /// RTL-SDR (RTL2832U with an R820T/R820T2/R828D tuner).
     Rtlsdr,
