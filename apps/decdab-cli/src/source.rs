@@ -1,6 +1,8 @@
 // made by CasualArclamp
 //! Opening what the commands read: an IQ file, or a radio (the HackRF, the
-//! Airspy or an RTL-SDR) tuned to a block or a frequency.
+//! Airspy, an RTL-SDR, the Pluto, a Fobos SDR, an SDRplay RSP, a USRP, a
+//! radio behind a DecSAT server, or network IQ) tuned to a block or a
+//! frequency.
 
 use std::path::Path;
 
@@ -60,6 +62,10 @@ impl IqSource for Live {
 pub fn live_rate(radio: Radio, rate: f64) -> f64 {
     match radio {
         Radio::Rtlsdr => 2.048,
+        // The Fobos starts at 8 MS/s, and the SDRplay at 2: DAB's own rates
+        // are not among theirs, and the receiver resamples whatever comes.
+        Radio::Fobos => rate.max(8.0),
+        Radio::Sdrplay => rate.max(2.0),
         _ => rate,
     }
 }
@@ -70,7 +76,226 @@ pub fn open_live(hz: f64, rate: f64, g: Gains) -> Result<Live> {
         Radio::Hackrf => open_hackrf(hz, rate, g),
         Radio::Airspy => open_airspy(hz, rate, g),
         Radio::Rtlsdr => open_rtlsdr(hz, g),
+        Radio::Pluto => open_pluto(hz, rate, g),
+        Radio::Fobos => open_fobos(hz, rate, g),
+        Radio::Sdrplay => open_sdrplay(hz, rate, g),
+        Radio::Uhd => open_uhd(hz, rate, g),
+        Radio::Remote => open_remote(hz, rate, g),
+        Radio::Net => open_net(hz, rate, g),
     }
+}
+
+#[cfg(feature = "pluto")]
+fn open_pluto(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use decdab_io::{EightBit, PlutoGain, PlutoSettings, PlutoSource};
+    let gain = if g.pluto_gain.eq_ignore_ascii_case("agc") {
+        PlutoGain::Agc
+    } else {
+        PlutoGain::Manual(g.pluto_gain.parse().map_err(|_| {
+            anyhow::anyhow!("--pluto-gain takes dB or agc, not {:?}", g.pluto_gain)
+        })?)
+    };
+    let src = PlutoSource::open(PlutoSettings {
+        uri: g.pluto_uri.parse().map_err(anyhow::Error::msg)?,
+        center_hz: hz,
+        sample_rate: rate * 1e6,
+        bandwidth: None,
+        gain,
+        eight_bit: if g.pluto_16bit {
+            EightBit::Off
+        } else {
+            EightBit::Auto
+        },
+    })?;
+    let ctl = src.control();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || ctl.lost()),
+    })
+}
+
+#[cfg(not(feature = "pluto"))]
+fn open_pluto(_: f64, _: f64, _: Gains) -> Result<Live> {
+    bail!("built without the pluto feature")
+}
+
+/// `A,B` as two numbers.
+#[cfg(any(feature = "fobos", feature = "sdrplay"))]
+fn gain_pair(s: &str, what: &str) -> Result<(u8, u8)> {
+    let bad = || anyhow::anyhow!("{what}, not {s:?}");
+    let (a, b) = s.split_once(',').ok_or_else(bad)?;
+    Ok((
+        a.trim().parse().map_err(|_| bad())?,
+        b.trim().parse().map_err(|_| bad())?,
+    ))
+}
+
+#[cfg(feature = "fobos")]
+fn open_fobos(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use decdab_io::{FobosGains, FobosSettings, FobosSource};
+    let d = FobosSettings::default();
+    let gains = match &g.fobos_gain {
+        Some(s) => {
+            let (lna, vga) = gain_pair(s, "--fobos-gain takes LNA,VGA (0-3, 0-31)")?;
+            FobosGains { lna, vga }.snapped()
+        }
+        None => d.gains,
+    };
+    let src = FobosSource::open(FobosSettings {
+        center_hz: hz.round() as u64,
+        sample_rate: (rate * 1e6).round() as u32,
+        gains,
+        external_clock: g.fobos_ext_clock,
+    })?;
+    let ctl = src.control();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || ctl.overflows()),
+    })
+}
+
+#[cfg(not(feature = "fobos"))]
+fn open_fobos(_: f64, _: f64, _: Gains) -> Result<Live> {
+    bail!("built without the fobos feature")
+}
+
+#[cfg(feature = "sdrplay")]
+fn open_sdrplay(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use decdab_io::{SdrplayGains, SdrplaySettings, SdrplaySource};
+    let d = SdrplaySettings::default();
+    let gains = match &g.sdrplay_gain {
+        Some(s) => {
+            let (lna, gr) = gain_pair(s, "--sdrplay-gain takes LNASTATE,IFGR (0-9, 20-59)")?;
+            SdrplayGains { lna, gr }.snapped()
+        }
+        None => d.gains,
+    };
+    let src = SdrplaySource::open(SdrplaySettings {
+        center_hz: hz.round() as u64,
+        sample_rate: (rate * 1e6).round() as u32,
+        gains,
+        tuner_b: g.sdrplay_tuner_b,
+    })?;
+    let ctl = src.control();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || ctl.overflows()),
+    })
+}
+
+#[cfg(not(feature = "sdrplay"))]
+fn open_sdrplay(_: f64, _: f64, _: Gains) -> Result<Live> {
+    bail!("built without the sdrplay feature")
+}
+
+#[cfg(all(windows, feature = "uhd"))]
+fn open_uhd(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use decdab_io::{UhdSettings, UhdSource};
+    let src = UhdSource::open(UhdSettings {
+        device_args: g.uhd_args.clone(),
+        center_hz: hz,
+        rate: rate * 1e6,
+        gain: g.uhd_gain,
+        antenna: g.uhd_antenna.clone(),
+        ..UhdSettings::default()
+    })?;
+    // UHD's overflows are counted inside the driver and end the stream if
+    // they do not stop; there is no counter to read here.
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(|| 0),
+    })
+}
+
+#[cfg(not(all(windows, feature = "uhd")))]
+fn open_uhd(_: f64, _: f64, _: Gains) -> Result<Live> {
+    bail!("built without the uhd feature (uhd.dll is loaded on Windows only)")
+}
+
+#[cfg(feature = "remote")]
+fn open_remote(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use anyhow::Context;
+    use decdab_io::remote::{ConnectOptions, IqParams, RadioRequest, RemoteIqSource};
+    let password = match &g.remote_password_file {
+        Some(f) => Some(
+            std::fs::read_to_string(f)
+                .with_context(|| format!("--remote-password-file {}", f.display()))?
+                .trim()
+                .to_string(),
+        ),
+        None => std::env::var("DECDAB_REMOTE_PASSWORD").ok(),
+    };
+    let mut stages = Vec::new();
+    for part in g
+        .remote_gain
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|p| !p.is_empty())
+    {
+        let (name, v) = part
+            .split_once('=')
+            .context("--remote-gain takes NAME=VALUE,NAME=VALUE")?;
+        let v: f64 = v
+            .parse()
+            .with_context(|| format!("--remote-gain {part}"))?;
+        stages.push((name.to_string(), v));
+    }
+    let src = RemoteIqSource::connect(
+        &ConnectOptions {
+            addr: g
+                .remote
+                .clone()
+                .context("--radio remote: give --remote HOST[:PORT]")?,
+            name: "decdab".into(),
+            password,
+            takeover: false,
+        },
+        RadioRequest {
+            key: g.remote_radio.clone(),
+            center_hz: hz,
+            sample_rate: rate * 1e6,
+            gains: stages,
+        },
+        IqParams {
+            bits: g.remote_bits,
+            zstd: if g.remote_zstd { 1 } else { 0 },
+            slice: None,
+        },
+    )?;
+    let lost = src.dropped_counter();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || lost.load(std::sync::atomic::Ordering::Relaxed)),
+    })
+}
+
+#[cfg(not(feature = "remote"))]
+fn open_remote(_: f64, _: f64, _: Gains) -> Result<Live> {
+    bail!("built without the remote feature")
+}
+
+fn open_net(hz: f64, rate: f64, g: Gains) -> Result<Live> {
+    use anyhow::Context;
+    use decdab_io::{NetIqSettings, NetIqSource, NetSample};
+    let url = g
+        .net
+        .as_deref()
+        .context("--radio net: give --net tcp://HOST:PORT (or listen://, udp://)")?;
+    let (mode, addr) = NetIqSettings::parse_url(url)?;
+    let src = NetIqSource::open(NetIqSettings {
+        mode,
+        addr,
+        sample: NetSample::parse(&g.net_iq)
+            .with_context(|| format!("--net-iq {}: int8, uint8, int16, int32 or float32", g.net_iq))?,
+        sample_rate: rate * 1e6,
+        center_hz: hz,
+    })?;
+    let ctl = src.control();
+    Ok(Live {
+        src: Box::new(src),
+        overflows: Box::new(move || ctl.overflows()),
+    })
 }
 
 #[cfg(feature = "hackrf")]

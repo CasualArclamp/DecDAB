@@ -18,7 +18,10 @@ mod radar_view;
 mod freq_display;
 mod guide;
 mod logos;
+mod more_radios;
 mod mux_map;
+mod net_ui;
+mod pluto_ui;
 mod prefs;
 mod recorder;
 mod remember;
@@ -41,6 +44,9 @@ use decdab_engine::{Command, CpuGauge, DabStatus, FrontEndSettings, Row, Stats};
 use decdab_fic::Ensemble;
 use decdab_io::name_hint;
 use eframe::egui::{self, Color32, RichText};
+use more_radios::{Extra, MoreRadios};
+use net_ui::NetUi;
+use pluto_ui::PlutoUi;
 use source::{AirspyGains, Gains, RtlGains, Session, Spec};
 use waterfall::{History, RingImage};
 
@@ -172,13 +178,12 @@ impl Options {
                     o.block = Some(parse_block(&v).ok_or(format!("not a Band III block: {v}"))?);
                 }
                 "--radio" => {
+                    const RADIOS: &str =
+                        "hackrf, airspy, rtlsdr, pluto, fobos, sdrplay, uhd, remote or net";
+                    let v = value(RADIOS)?.to_lowercase();
                     o.radio = Some(
-                        match value("hackrf, airspy or rtlsdr")?.to_lowercase().as_str() {
-                            "hackrf" => SourceKind::HackRf,
-                            "airspy" => SourceKind::Airspy,
-                            "rtlsdr" => SourceKind::RtlSdr,
-                            v => return Err(format!("--radio: not hackrf, airspy or rtlsdr: {v}")),
-                        },
+                        SourceKind::from_key(&v)
+                            .ok_or(format!("--radio: not {RADIOS}: {v}"))?,
                     );
                 }
                 "--rate" => {
@@ -297,7 +302,7 @@ fn main() -> eframe::Result {
             eprintln!("decdab-gui: {e}");
             eprintln!(
                 "usage: decdab-gui [capture.cs8] [--block 12B] [--rate MSPS] [--play SERVICE] \
-                 [--radio hackrf|airspy|rtlsdr] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|channel|guide|sfn|radar|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
+                 [--radio hackrf|airspy|rtlsdr|pluto|fobos|sdrplay|uhd|remote|net] [--screenshot OUT.png] [--after SECS] [--fps N] [--bottom scopes|channel|guide|sfn|radar|none]                  [--record-video OUT.mp4 --record-from SECS --record-secs SECS] \
                  [--window sdr] [--mute] [--no-decode] [--simple] [--screen playing|scan]"
             );
             std::process::exit(2);
@@ -338,6 +343,12 @@ enum SourceKind {
     HackRf,
     Airspy,
     RtlSdr,
+    /// The ADALM-PLUTO / Pluto+ (`pluto_ui.rs`).
+    Pluto,
+    /// Raw IQ from another program over TCP or UDP (tuned at its sender).
+    Network,
+    /// The Fobos, an SDRplay, a USRP or a DecSAT server (`more_radios.rs`).
+    More(Extra),
     File,
 }
 
@@ -345,6 +356,52 @@ impl SourceKind {
     /// A live radio rather than a file.
     fn is_radio(self) -> bool {
         self != SourceKind::File
+    }
+
+    /// One of the radios that keep their own rate and gain (drawn by
+    /// `other_radio_row`).
+    fn other(self) -> bool {
+        matches!(
+            self,
+            SourceKind::Pluto | SourceKind::Network | SourceKind::More(_)
+        )
+    }
+
+    /// The name the preferences, `--radio` and the session log use.
+    fn key(self) -> &'static str {
+        match self {
+            SourceKind::HackRf => "hackrf",
+            SourceKind::Airspy => "airspy",
+            SourceKind::RtlSdr => "rtlsdr",
+            SourceKind::Pluto => "pluto",
+            SourceKind::Network => "net",
+            SourceKind::More(k) => k.key(),
+            SourceKind::File => "file",
+        }
+    }
+
+    /// A radio by its key (not the file).
+    fn from_key(s: &str) -> Option<SourceKind> {
+        match s {
+            "hackrf" => Some(SourceKind::HackRf),
+            "airspy" => Some(SourceKind::Airspy),
+            "rtlsdr" | "rtl" => Some(SourceKind::RtlSdr),
+            "pluto" | "plutoplus" => Some(SourceKind::Pluto),
+            "net" | "network" => Some(SourceKind::Network),
+            k => Extra::from_key(k).map(SourceKind::More),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SourceKind::HackRf => "HackRF",
+            SourceKind::Airspy => "Airspy R2",
+            SourceKind::RtlSdr => "RTL-SDR",
+            SourceKind::Pluto => "Pluto / Pluto+",
+            SourceKind::Network => "Network IQ",
+            SourceKind::More(k) => k.label(),
+            SourceKind::File => "IQ file",
+        }
     }
 }
 
@@ -382,6 +439,11 @@ struct App {
     air_gains: AirspyGains,
     /// The RTL-SDR's tuner gain.
     rtl_gains: RtlGains,
+    /// The Pluto's settings, network IQ's, and those of the radios from
+    /// DecSAT (Fobos, SDRplay, USRP, a DecSAT server).
+    pluto: PlutoUi,
+    net: NetUi,
+    more: MoreRadios,
     file: Option<PathBuf>,
     file_centre_mhz: f64,
     file_rate_msps: f64,
@@ -472,11 +534,12 @@ impl App {
             block = block_at(h).unwrap_or(block);
         }
         let file = kept.file.clone().filter(|f| f.exists());
-        let radio = opts.radio.unwrap_or(match kept.radio.as_deref() {
-            Some("airspy") => SourceKind::Airspy,
-            Some("rtlsdr") => SourceKind::RtlSdr,
-            _ => SourceKind::HackRf,
-        });
+        let radio = opts.radio.unwrap_or(
+            kept.radio
+                .as_deref()
+                .and_then(SourceKind::from_key)
+                .unwrap_or(SourceKind::HackRf),
+        );
         let kind = if !by_hand && kept.file_source && file.is_some() {
             SourceKind::File
         } else {
@@ -505,6 +568,15 @@ impl App {
             gains: kept.gains.unwrap_or_default(),
             air_gains: kept.air_gains.unwrap_or_default(),
             rtl_gains: kept.rtl_gains.unwrap_or_default(),
+            pluto: PlutoUi::load(prefs::get),
+            net: NetUi::load(prefs::get),
+            more: {
+                let mut m = MoreRadios::load(prefs::get);
+                if let (SourceKind::More(k), Some(r)) = (radio, opts.rate_msps) {
+                    m.set_rate(k, r * 1e6);
+                }
+                m
+            },
             file,
             file_centre_mhz: kept.file_centre_mhz.unwrap_or(0.0),
             file_rate_msps: kept.file_rate_msps.unwrap_or(4.096),
@@ -604,9 +676,8 @@ impl App {
             rate_khz: (self.rate_msps * 1e3).round() as i64,
             gains: self.gains,
             radio: match self.radio_kind {
-                SourceKind::Airspy => "airspy",
-                SourceKind::RtlSdr => "rtlsdr",
-                _ => "hackrf",
+                SourceKind::File => "hackrf",
+                k => k.key(),
             },
             air_gains: self.air_gains,
             rtl_gains: self.rtl_gains,
@@ -680,6 +751,40 @@ impl App {
                 let spec = Spec::RtlSdr {
                     center_hz: fc,
                     gains: self.rtl_gains,
+                };
+                self.begin(spec, Some(fc));
+            }
+            SourceKind::Pluto => {
+                let fc = self.tune_hz;
+                if fc <= 0.0 {
+                    return;
+                }
+                let spec = Spec::Pluto {
+                    center_hz: fc,
+                    ui: self.pluto.clone(),
+                };
+                self.begin(spec, Some(fc));
+            }
+            SourceKind::Network => {
+                let fc = self.tune_hz;
+                if fc <= 0.0 {
+                    return;
+                }
+                let spec = Spec::Net {
+                    net: self.net.clone(),
+                    center_hz: fc,
+                };
+                self.begin(spec, Some(fc));
+            }
+            SourceKind::More(kind) => {
+                let fc = self.tune_hz;
+                if fc <= 0.0 {
+                    return;
+                }
+                let spec = Spec::More {
+                    kind,
+                    center_hz: fc,
+                    radios: Box::new(self.more.clone()),
                 };
                 self.begin(spec, Some(fc));
             }
@@ -992,8 +1097,60 @@ impl App {
         }
     }
 
+    /// Write settings that are kept as they change (not in a screenshot
+    /// run, which leaves the preferences as it found them).
+    fn keep(&self, pairs: Vec<(&'static str, String)>) {
+        if self.keeper.is_none() {
+            return;
+        }
+        let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        prefs::set_many(&refs);
+    }
+
+    /// The rate and gain of the radios that keep their own settings: the
+    /// Pluto, network IQ and the ones from DecSAT.
+    fn other_radio_row(&mut self, ui: &mut egui::Ui, running: bool) {
+        // Rust note: the settings and `self.session` are different fields,
+        // so one can be borrowed mutably while the other is read.
+        match self.kind {
+            SourceKind::Pluto => {
+                let live = self.session.as_ref().and_then(|s| s.pluto.as_ref());
+                let (reopen, save) = self.pluto.ui(ui, live);
+                if save {
+                    self.keep(self.pluto.save());
+                }
+                if reopen && running {
+                    self.start();
+                }
+            }
+            SourceKind::Network => {
+                let live = self.session.as_ref().and_then(|s| s.net.as_ref());
+                if self.net.ui(ui, live) {
+                    self.keep(self.net.save());
+                    if running {
+                        self.start();
+                    }
+                }
+            }
+            SourceKind::More(k) => {
+                let live = self.session.as_ref().and_then(|s| s.more.as_ref());
+                let ch = self.more.ui(k, ui, live);
+                if ch.reopen || ch.save {
+                    self.keep(self.more.save());
+                }
+                if ch.reopen && running {
+                    self.start();
+                }
+            }
+            _ => {}
+        }
+        if let Some(i) = self.session.as_ref().and_then(|s| s.info.as_deref()) {
+            ui.label(RichText::new(i).small().weak());
+        }
+    }
+
     fn start_optimiser(&mut self) {
-        if self.kind == SourceKind::RtlSdr {
+        if self.kind == SourceKind::RtlSdr || self.kind.other() {
             self.note = "The gain optimiser is for the HackRF and the Airspy".into();
             return;
         }
@@ -1137,12 +1294,7 @@ impl App {
     // ---- recording ------------------------------------------------------
 
     fn source_name(&self) -> &'static str {
-        match self.kind {
-            SourceKind::HackRf => "hackrf",
-            SourceKind::Airspy => "airspy",
-            SourceKind::RtlSdr => "rtlsdr",
-            SourceKind::File => "file",
-        }
+        self.kind.key()
     }
 
     fn snapshot_path(&self) -> PathBuf {
@@ -1250,6 +1402,7 @@ impl App {
             match self.kind {
                 SourceKind::Airspy => "_airspy",
                 SourceKind::RtlSdr => "_rtlsdr",
+                k if k.other() => "",
                 _ if self.gains.amp => "_amp",
                 _ => "",
             },
@@ -1476,17 +1629,17 @@ impl App {
             let live = self.kind.is_radio();
             let before = self.kind;
             egui::ComboBox::from_id_salt("source")
-                .selected_text(match self.kind {
-                    SourceKind::HackRf => "HackRF",
-                    SourceKind::Airspy => "Airspy R2",
-                    SourceKind::RtlSdr => "RTL-SDR",
-                    SourceKind::File => "IQ file",
-                })
+                .selected_text(self.kind.label())
                 .width(90.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.kind, SourceKind::HackRf, "HackRF");
                     ui.selectable_value(&mut self.kind, SourceKind::Airspy, "Airspy R2");
                     ui.selectable_value(&mut self.kind, SourceKind::RtlSdr, "RTL-SDR");
+                    ui.selectable_value(&mut self.kind, SourceKind::Pluto, "ADALM-PLUTO / Pluto+");
+                    for k in Extra::ALL {
+                        ui.selectable_value(&mut self.kind, SourceKind::More(k), k.label());
+                    }
+                    ui.selectable_value(&mut self.kind, SourceKind::Network, "Network IQ");
                     ui.selectable_value(&mut self.kind, SourceKind::File, "IQ file");
                 });
             if before != self.kind && running {
@@ -1519,8 +1672,15 @@ impl App {
                 ui.label(format!("{:.3} MHz", self.block.hz() / 1e6));
 
                 ui.separator();
-                ui.label("rate");
-                if self.kind == SourceKind::RtlSdr {
+                if self.kind.other() {
+                    // Its own rate and gain, in one run of controls.
+                    self.other_radio_row(ui, running);
+                } else {
+                    ui.label("rate");
+                }
+                if self.kind.other() {
+                    // Drawn above.
+                } else if self.kind == SourceKind::RtlSdr {
                     ui.label("2.048 MS/s")
                         .on_hover_text("The RTL-SDR runs at DAB's own rate only.");
                 } else {
@@ -1538,8 +1698,12 @@ impl App {
                     }
                 }
 
-                ui.separator();
-                if self.kind == SourceKind::Airspy {
+                if !self.kind.other() {
+                    ui.separator();
+                }
+                if self.kind.other() {
+                    // Drawn above.
+                } else if self.kind == SourceKind::Airspy {
                     // One slider over the presets (the three stages, which are
                     // indices rather than dB, are in the SDR window).
                     let mut g = self.air_gains;
@@ -2083,6 +2247,7 @@ impl eframe::App for App {
                     gains: &mut self.gains,
                     air_gains: (self.kind == SourceKind::Airspy).then_some(&mut self.air_gains),
                     rtl_gains: (self.kind == SourceKind::RtlSdr).then_some(&mut self.rtl_gains),
+                    other: self.kind.other(),
                     live,
                     front_end: self.stats.front_end,
                     optimiser: self.optimiser.as_ref(),

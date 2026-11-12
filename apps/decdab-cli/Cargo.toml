@@ -13,10 +13,17 @@ name = "decdab"
 path = "src/main.rs"
 
 [features]
-default = ["hackrf", "airspy", "rtlsdr"]
+# The Fobos, SDRplay and USRP (UHD, Windows) drivers load their maker's
+# library at run time, so they build anywhere; the remote link is plain TCP.
+default = ["hackrf", "airspy", "rtlsdr", "pluto", "fobos", "sdrplay", "uhd", "remote"]
 hackrf = ["decdab-io/hackrf"]
 airspy = ["decdab-io/airspy"]
 rtlsdr = ["decdab-io/rtlsdr"]
+pluto = ["decdab-io/pluto"]
+fobos = ["decdab-io/fobos"]
+sdrplay = ["decdab-io/sdrplay"]
+uhd = ["decdab-io/uhd"]
+remote = ["decdab-io/remote"]
 
 [dependencies]
 decdab-core = { path = "../../crates/decdab-core" }

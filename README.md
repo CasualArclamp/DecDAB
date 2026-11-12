@@ -47,6 +47,15 @@ download and run.
 | HackRF One | Band III is often weak: try `--amp --lna 40 --vga 20`. |
 | Airspy R2 | Pure-Rust driver; libairspy-style gain presets (`--airspy-preset sensitivity:15`). |
 | RTL-SDR | RTL2832U with an R820T/R820T2/R828D tuner, 2.048 MS/s. Less tested than the others. |
+| ADALM-PLUTO / Pluto+ | Pure-Rust driver over USB or the network (`--pluto-uri auto\|usb\|ip:ADDRESS`, `--pluto-gain 50\|agc`). Receive only. Not yet tried on a real Pluto. |
+| Fobos SDR | Needs RigExpert's `fobos_sdr.dll` (agile firmware) or `fobos.dll` (stock) beside the exe; runs at 8 MS/s. Not yet tried on the radio. |
+| SDRplay RSP | Needs the SDRplay API installed (sdrplay.com). `--sdrplay-gain LNASTATE,IFGR`. Not yet tried on the radio. |
+| USRP | Through UHD (`uhd.dll`, Windows; `--uhd-args`, `--uhd-gain`). Not yet tried on the radio. |
+| DecSAT server | A radio on another machine, behind [DecSAT](https://github.com/CasualArclamp/DecSAT)'s `decsat-server`: `--radio remote --remote HOST`. The link is not encrypted. |
+| Network IQ | Raw IQ from SDR++'s IQ Exporter, GNU Radio or rtl_tcp: `--radio net --net tcp://127.0.0.1:7777`. Set the sender to the rate asked for (4.096 MS/s) and tune it at its end. |
+
+The Fobos, SDRplay and USRP drivers load their maker's library when the radio
+is started, so DecDAB runs without them.
 
 ## Using it
 
@@ -60,7 +69,7 @@ decdab decode captures/FILE.cs8 -s "Service name" -o out.wav   # one service to 
 decdab-gui                            # the GUI
 ```
 
-Pick the radio with `--radio hackrf|airspy|rtlsdr`. Recordings are named by
+Pick the radio with `--radio hackrf|airspy|rtlsdr|pluto|fobos|sdrplay|uhd|remote|net`. Recordings are named by
 their tuning (`12b_225.648MHz_4.096Msps_amp.cs8`) and the tools read the centre
 frequency and sample rate from the name.
 
