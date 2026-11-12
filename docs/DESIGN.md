@@ -48,7 +48,7 @@ core for a whole receiver with audio:
 | Crate | What |
 |---|---|
 | `decdab-core` | Samples, errors, the Band III block plan, CRC-16, DAB charsets. |
-| `decdab-io` | HackRF, Airspy R2 and RTL-SDR (pure-Rust drivers), the Airspy's real-to-IQ converter, IQ files, WAV IQ. From DecDVB-T. |
+| `decdab-io` | HackRF, Airspy R2 and RTL-SDR (pure-Rust drivers), the Airspy's real-to-IQ converter, IQ files, WAV IQ. From DecDVB-T. Also the Pluto (DecDVB-T's), network IQ (DecLAB's), and DecSAT's Fobos, SDRplay, UHD and remote-server client. |
 | `decdab-dsp` | FIR, DDC, resampler, AGC, DC. From DecDVB-T. |
 | `decdab-ofdm` | Mode I parameters, phase reference, frequency interleaver, the front-end decimator, the demodulator (null/PRS sync, CFO, DQPSK → soft bits). |
 | `decdab-fec` | Rate-1/4 K = 7 code, puncturing (FIC, EEP-A/B, UEP Table 31), block Viterbi, energy dispersal, time interleaving, RS(120,110). |

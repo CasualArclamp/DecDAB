@@ -30,7 +30,8 @@ pub struct Snapshot {
     pub file_source: bool,
     pub rate_khz: i64,
     pub gains: Gains,
-    /// The radio last used ("hackrf", "airspy" or "rtlsdr"), and the
+    /// The radio last used ("hackrf", "airspy", "rtlsdr", "pluto", "net",
+    /// "fobos", "sdrplay", "uhd" or "remote"), and the
     /// Airspy's and the RTL-SDR's gains.
     pub radio: &'static str,
     pub air_gains: AirspyGains,

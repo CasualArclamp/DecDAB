@@ -534,6 +534,9 @@ pub struct SdrView<'a> {
     pub air_gains: Option<&'a mut AirspyGains>,
     /// The RTL-SDR's gain, when that is the radio.
     pub rtl_gains: Option<&'a mut RtlGains>,
+    /// The radio is one whose rate and gain are in the top bar (the Pluto,
+    /// network IQ, the radios from DecSAT).
+    pub other: bool,
     pub live: bool,
     pub front_end: FrontEndReading,
     pub optimiser: Option<&'a Optimiser>,
@@ -570,11 +573,28 @@ fn body(ui: &mut Ui, v: SdrView, asks: &mut SdrAsks) {
         gains,
         air_gains,
         rtl_gains,
+        other,
         live,
         front_end,
         optimiser,
         last_result,
     } = v;
+    if other {
+        ui.label(
+            RichText::new(
+                "This radio's rate and gain are in the bar at the top; the gain optimiser \
+                 is for the HackRF and the Airspy.",
+            )
+            .small()
+            .weak(),
+        );
+        samples_body(ui, settings, front_end);
+        ui.add_space(6.0);
+        if ui.button("Defaults").clicked() {
+            asks.reset = true;
+        }
+        return;
+    }
     if let Some(g) = rtl_gains {
         ui.add_enabled_ui(live, |ui| {
             ui.label(RichText::new("Gain").strong());

@@ -1,12 +1,17 @@
 // made by CasualArclamp
-//! Opening a source and running the engine on it: the HackRF, the Airspy or
-//! an RTL-SDR at a block, or a recorded IQ file.
+//! Opening a source and running the engine on it: the HackRF, the Airspy, an
+//! RTL-SDR, the Pluto, one of the radios from DecSAT (`more_radios.rs`) or
+//! network IQ at a block, or a recorded IQ file.
 
 use std::path::PathBuf;
 
 use decdab_core::SampleFormat;
 use decdab_engine::{Rx, RxOptions};
-use decdab_io::{IqFileReader, IqSource, format_from_path};
+use decdab_io::{IqFileReader, IqSource, NetIqControl, format_from_path};
+
+use crate::more_radios::{Extra, MoreControl, MoreRadios};
+use crate::net_ui::NetUi;
+use crate::pluto_ui::{PlutoLive, PlutoUi};
 
 /// The Airspy's three gain stages (indices, with libairspy's presets).
 pub use decdab_io::AirspyGains;
@@ -57,6 +62,25 @@ pub enum Spec {
         center_hz: f64,
         gains: RtlGains,
     },
+    /// The ADALM-PLUTO / Pluto+ (receive only).
+    Pluto {
+        center_hz: f64,
+        ui: PlutoUi,
+    },
+    /// Raw IQ from another program; `center_hz` labels it (an rtl_tcp
+    /// server is tuned to it).
+    Net {
+        net: NetUi,
+        center_hz: f64,
+    },
+    /// The Fobos, an SDRplay, a USRP or a DecSAT server's radio.
+    More {
+        kind: Extra,
+        center_hz: f64,
+        // Rust note: boxed so this one variant does not make every `Spec`
+        // as large as the whole settings struct.
+        radios: Box<MoreRadios>,
+    },
     File {
         path: PathBuf,
         center_hz: f64,
@@ -72,6 +96,13 @@ type Setter<T> = Box<dyn Fn(T) -> Result<(), String>>;
 pub struct Session {
     pub rx: Rx,
     pub live: bool,
+    /// The network stream's counters, when that is the source.
+    pub net: Option<NetIqControl>,
+    /// The live controls of a radio from DecSAT, when one is the source.
+    pub more: Option<MoreControl>,
+    /// The Pluto's, and what the radio said about itself.
+    pub pluto: Option<PlutoLive>,
+    pub info: Option<String>,
     set_gains: Option<GainSetter>,
     set_air_gains: Option<AirGainSetter>,
     set_rtl_gains: Option<Setter<RtlGains>>,
@@ -115,6 +146,10 @@ impl Session {
                 Ok(Session {
                     rx,
                     live: true,
+                    net: None,
+                    more: None,
+                    pluto: None,
+                    info: None,
                     set_air_gains: None,
                     set_rtl_gains: None,
                     set_gains: Some(Box::new(move |g| {
@@ -163,6 +198,10 @@ impl Session {
                 Ok(Session {
                     rx,
                     live: true,
+                    net: None,
+                    more: None,
+                    pluto: None,
+                    info: None,
                     set_gains: None,
                     set_air_gains: Some(Box::new(move |g| {
                         ctl.set_gains(g).map_err(|e| e.to_string())
@@ -197,6 +236,10 @@ impl Session {
                 Ok(Session {
                     rx,
                     live: true,
+                    net: None,
+                    more: None,
+                    pluto: None,
+                    info: None,
                     set_gains: None,
                     set_air_gains: None,
                     set_rtl_gains: Some(Box::new(move |g| {
@@ -210,6 +253,69 @@ impl Session {
             }
             #[cfg(not(feature = "rtlsdr"))]
             Spec::RtlSdr { .. } => Err("built without the rtlsdr feature".into()),
+            Spec::Pluto { center_hz, ui } => {
+                let (src, ctl, info) = ui.open(*center_hz)?;
+                #[cfg(feature = "pluto")]
+                let probe: Option<decdab_engine::DropProbe> = {
+                    let c = ctl.clone();
+                    Some(Box::new(move || c.lost()))
+                };
+                #[cfg(not(feature = "pluto"))]
+                let probe = None;
+                let rx = Rx::start(src, opts, probe);
+                Ok(Session {
+                    rx,
+                    live: true,
+                    net: None,
+                    more: None,
+                    pluto: Some(ctl),
+                    info: Some(info),
+                    set_gains: None,
+                    set_air_gains: None,
+                    set_rtl_gains: None,
+                    set_filter: None,
+                    set_ppm: None,
+                })
+            }
+            Spec::Net { net, center_hz } => {
+                let (src, ctl) = net.open(*center_hz)?;
+                let probe = ctl.clone();
+                let rx = Rx::start(src, opts, Some(Box::new(move || probe.overflows())));
+                Ok(Session {
+                    rx,
+                    live: true,
+                    net: Some(ctl),
+                    more: None,
+                    pluto: None,
+                    info: None,
+                    set_gains: None,
+                    set_air_gains: None,
+                    set_rtl_gains: None,
+                    set_filter: None,
+                    set_ppm: None,
+                })
+            }
+            Spec::More {
+                kind,
+                center_hz,
+                radios,
+            } => {
+                let (src, control) = radios.open(*kind, *center_hz)?;
+                let rx = Rx::start(src, opts, Some(control.drop_probe()));
+                Ok(Session {
+                    rx,
+                    live: true,
+                    net: None,
+                    info: Some(control.info()).filter(|i| !i.is_empty()),
+                    more: Some(control),
+                    pluto: None,
+                    set_gains: None,
+                    set_air_gains: None,
+                    set_rtl_gains: None,
+                    set_filter: None,
+                    set_ppm: None,
+                })
+            }
             Spec::File {
                 path,
                 center_hz,
@@ -223,6 +329,10 @@ impl Session {
                 Ok(Session {
                     rx: Rx::start(src, opts, None),
                     live: false,
+                    net: None,
+                    more: None,
+                    pluto: None,
+                    info: None,
                     set_gains: None,
                     set_air_gains: None,
                     set_rtl_gains: None,

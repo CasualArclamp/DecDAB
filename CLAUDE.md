@@ -22,6 +22,11 @@ cargo test --release -p decdab-io --features airspy live_airspy -- --ignored --n
 cargo run --release -p decdab-cli -- rtlsdr                           # RTL-SDR: the dongle and its tuner (R820T/R828D only)
 cargo run --release -p decdab-cli -- info 11D --radio rtlsdr --rtl-gain 40.2   # live from an RTL-SDR (always 2.048 MS/s; --rtl-gain agc, --rtl-ppm N)
 cargo test --release -p decdab-io --features rtlsdr live_rtlsdr -- --ignored --nocapture   # RTL-SDR attached: 3 s stream, retune
+cargo run --release -p decdab-cli -- info 11D --radio pluto --pluto-gain 50   # ADALM-PLUTO / Pluto+ (--pluto-uri auto|usb|ip:ADDRESS, --pluto-gain agc, --pluto-16bit); receive only
+cargo run --release -p decdab-cli -- info 11D --radio sdrplay --sdrplay-gain 4,40   # the radios from DecSAT: --radio fobos (--fobos-gain LNA,VGA), sdrplay, uhd (--uhd-args, --uhd-gain, --uhd-antenna); each loads its maker's DLL at run time
+cargo run --release -p decdab-cli -- info 11D --radio remote --remote 127.0.0.1:5262 --remote-radio hackrf   # a radio behind DecSAT's decsat-server (--remote-password-file, --remote-bits, --remote-zstd, --remote-gain NAME=V,…)
+cargo run --release -p decdab-cli -- info 11D --radio net --net tcp://127.0.0.1:7777 --net-iq int8   # raw IQ at 4.096 MS/s from SDR++'s IQ Exporter, GNU Radio, rtl_tcp (also listen://, udp://); decdab-io's net_send example plays a file out as one
+cargo test --release -p decdab-io --features pluto,remote   # the Pluto against a fake IIOD server, the server link against a stand-in server, network IQ on loopback
 cargo run --release -p decdab-cli -- info captures/12b_225.648MHz_4.096Msps_amp.cs8   # ensemble, services, sub-channels
 cargo run --release -p decdab-cli -- info 11D --amp                   # the same, live
 cargo run --release -p decdab-cli -- decode captures/11d_222.064MHz_4.096Msps_amp.cs8 -s "Classic FM" -o out/x.wav   # a service to WAV, CPU per stage
@@ -55,6 +60,17 @@ Windows exes, checks and smoke-tests them and drafts the release; then
 `gh release edit vX.Y.Z --title … --notes-file … --draft=false --latest`. Locally,
 `powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1` writes the same
 exes to `exe\` (git-ignored).
+
+**More radios** (all receive only; the GUI's settings for them are in
+`apps/decdab-gui/src/pluto_ui.rs`, `net_ui.rs` and `more_radios.rs`, kept in
+`prefs.txt` as they change): the Pluto driver (`decdab-io/src/pluto*`, feature
+`pluto`) is DecDVB-T's by way of DecLAB, without its transmitter; network IQ
+(`net.rs`) is DecLAB's; the Fobos SDR, SDRplay RSP and USRP drivers (`fobos.rs`,
+`sdrplay.rs`, `uhd.rs`) are DecSAT's, each loading its maker's library at run
+time (`DECDAB_FOBOS_LIB`, `DECDAB_SDRPLAY_LIB`, `UHD_DLL` name a file; UHD on
+Windows only); `remote` is the client of DecSAT's `decsat-server` in its IQ
+mode (`remote/msg.rs` must keep DecSAT's layout). None of these has been run
+on hardware here.
 
 Rust is installed through rustup (stable MSVC). In Git Bash, `~/.cargo/bin`
 may need adding to PATH. FDK-AAC builds from `third_party/fdk-aac` (a

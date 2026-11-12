@@ -96,12 +96,33 @@ pub enum Radio {
     Airspy,
     /// RTL-SDR (RTL2832U with an R820T/R820T2/R828D tuner).
     Rtlsdr,
+    /// ADALM-PLUTO or Pluto+, over USB or the network (receive only).
+    #[value(alias = "plutoplus")]
+    Pluto,
+    /// RigExpert Fobos SDR (needs RigExpert's fobos_sdr / fobos library).
+    Fobos,
+    /// SDRplay RSP (needs the SDRplay API installed).
+    #[value(alias = "rsp")]
+    Sdrplay,
+    /// A USRP through UHD (uhd.dll, Windows).
+    #[value(alias = "usrp")]
+    Uhd,
+    /// A radio behind DecSAT's decsat-server (`--remote HOST[:PORT]`).
+    #[value(alias = "decsat")]
+    Remote,
+    /// Raw IQ over the network (`--net URL`), tuned at its sender (an
+    /// rtl_tcp server is tuned from here).
+    #[value(alias = "network")]
+    Net,
 }
 
 /// The radio and its gains: `--lna/--vga/--amp` are the HackRF's, the
 /// `--airspy-*` ones the Airspy's, the `--rtl-*` ones the RTL-SDR's. Unused
-/// by a file.
-#[derive(clap::Args, Clone, Copy)]
+/// by a file. The radios added from DecSAT, the Pluto and network IQ have
+/// their own flags below.
+// Rust note: with `String` fields this is `Clone` but no longer `Copy`, so
+// it is cloned where it is handed on and still needed.
+#[derive(clap::Args, Clone)]
 pub struct Gains {
     /// The radio for a live source.
     #[arg(long, value_enum, default_value = "hackrf")]
@@ -138,6 +159,67 @@ pub struct Gains {
     /// RTL-SDR: the dongle's clock error, ppm (positive: it runs high).
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     pub rtl_ppm: f64,
+    /// Pluto: where it is: `auto` (USB, else 192.168.2.1), `usb`,
+    /// `ip:ADDRESS` (a Pluto+ on Ethernet).
+    #[arg(long, default_value = "auto", value_name = "URI")]
+    pub pluto_uri: String,
+    /// Pluto: receive gain, dB (about -3 to 71), or `agc`.
+    #[arg(long, default_value = "50", value_name = "DB|agc")]
+    pub pluto_gain: String,
+    /// Pluto: stream 16-bit IQ even when the firmware (Tezuka) offers 8-bit.
+    #[arg(long)]
+    pub pluto_16bit: bool,
+    /// Fobos: LNA step 0-3 and VGA step 0-31 (2 dB each).
+    #[arg(long, value_name = "LNA,VGA")]
+    pub fobos_gain: Option<String>,
+    /// Fobos: lock to 10 MHz on its CLK IN socket.
+    #[arg(long)]
+    pub fobos_ext_clock: bool,
+    /// SDRplay: gain reductions, LNA state (0 = most gain) and IF gain
+    /// reduction 20-59 dB.
+    #[arg(long, value_name = "LNASTATE,IFGR")]
+    pub sdrplay_gain: Option<String>,
+    /// SDRplay: use an RSPduo's Tuner B.
+    #[arg(long)]
+    pub sdrplay_tuner_b: bool,
+    /// USRP: UHD device selector (`serial=…`, `type=b200`, `addr=…`); the
+    /// first USRP found if not given.
+    #[arg(long, default_value = "", value_name = "ARGS")]
+    pub uhd_args: String,
+    /// USRP: receive gain, dB.
+    #[arg(long, default_value_t = 35.0, value_name = "DB")]
+    pub uhd_gain: f64,
+    /// USRP: receive port.
+    #[arg(long, default_value = "RX2", value_name = "PORT")]
+    pub uhd_antenna: String,
+    /// A decsat-server to take a radio from: HOST or HOST:PORT.
+    #[arg(long, value_name = "HOST[:PORT]")]
+    pub remote: Option<String>,
+    /// Remote: the server's name for the radio (hackrf, pluto, …); its
+    /// first if not given.
+    #[arg(long, default_value = "", value_name = "KEY")]
+    pub remote_radio: String,
+    /// Remote: a file holding the server's password (else the variable
+    /// DECDAB_REMOTE_PASSWORD), so it stays out of the shell's history.
+    #[arg(long, value_name = "FILE")]
+    pub remote_password_file: Option<PathBuf>,
+    /// Remote: bits a sample component on the link: 4, 6, 8, 10, 12 or 16.
+    #[arg(long, default_value_t = 8)]
+    pub remote_bits: u8,
+    /// Remote: have the server zstd-compress the IQ.
+    #[arg(long)]
+    pub remote_zstd: bool,
+    /// Remote: the radio's gains, by the server's stage names.
+    #[arg(long, value_name = "NAME=V,NAME=V")]
+    pub remote_gain: Option<String>,
+    /// Network IQ: tcp://HOST:PORT, listen://ADDR:PORT or udp://ADDR:PORT.
+    /// The stream runs at the rate the command asks for (4.096 MS/s unless
+    /// `capture --rate` says otherwise): set the sender to it.
+    #[arg(long, value_name = "URL")]
+    pub net: Option<String>,
+    /// Network IQ: the sample type: int8, uint8, int16, int32 or float32.
+    #[arg(long, default_value = "int8", value_name = "TYPE")]
+    pub net_iq: String,
 }
 
 impl Gains {
@@ -245,6 +327,14 @@ fn capture(what: &str, rate: f64, seconds: f64, g: Gains, out: Option<PathBuf>) 
         Radio::Hackrf => (SampleFormat::Cs8, "cs8", if g.amp { "_amp" } else { "" }),
         Radio::Airspy => (SampleFormat::Cs16, "cs16", "_airspy"),
         Radio::Rtlsdr => (SampleFormat::Cu8, "cu8", "_rtlsdr"),
+        // 12 bits and more from these (a server's or a network stream's
+        // may be fewer): 16 keeps whatever comes.
+        Radio::Pluto => (SampleFormat::Cs16, "cs16", "_pluto"),
+        Radio::Fobos => (SampleFormat::Cs16, "cs16", "_fobos"),
+        Radio::Sdrplay => (SampleFormat::Cs16, "cs16", "_sdrplay"),
+        Radio::Uhd => (SampleFormat::Cs16, "cs16", "_usrp"),
+        Radio::Remote => (SampleFormat::Cs16, "cs16", "_remote"),
+        Radio::Net => (SampleFormat::Cs16, "cs16", "_net"),
     };
     let path = out.unwrap_or_else(|| {
         let block = block_at(hz).map_or("f".to_string(), |b| b.name.to_ascii_lowercase());

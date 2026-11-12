@@ -14,12 +14,19 @@ name = "decdab-gui"
 path = "src/main.rs"
 
 [features]
-# The HackRF, Airspy and RTL-SDR drivers are pure Rust (no SDK, no DLLs), so they are on
-# by default.
-default = ["hackrf", "airspy", "rtlsdr"]
+# The HackRF, Airspy, RTL-SDR and Pluto drivers are pure Rust (no SDK, no
+# DLLs). The Fobos, SDRplay and USRP (UHD, Windows) ones load their maker's
+# library at run time, so nothing is needed to build them either, and the
+# remote link is plain TCP: all are on by default.
+default = ["hackrf", "airspy", "rtlsdr", "pluto", "fobos", "sdrplay", "uhd", "remote"]
 hackrf = ["decdab-io/hackrf"]
 airspy = ["decdab-io/airspy"]
 rtlsdr = ["decdab-io/rtlsdr"]
+pluto = ["decdab-io/pluto"]
+fobos = ["decdab-io/fobos"]
+sdrplay = ["decdab-io/sdrplay"]
+uhd = ["decdab-io/uhd"]
+remote = ["decdab-io/remote"]
 
 [dependencies]
 decdab-core = { path = "../../crates/decdab-core" }
