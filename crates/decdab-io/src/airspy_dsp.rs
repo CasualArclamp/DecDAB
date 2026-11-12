@@ -368,6 +368,8 @@ fn dot2(row: &[f32], xi: &[f32], xq: &[f32]) -> (f32, f32) {
 /// The converter: raw Airspy bytes in, IQ at the output rate out.
 pub struct IqConverter {
     packed: bool,
+    /// The complex rate the radio runs at (half its ADC's), Hz.
+    in_hz: u32,
     out_hz: u32,
     /// The DC estimate, in ADC codes.
     dc: f32,
@@ -394,13 +396,39 @@ impl IqConverter {
         Self::with_halfbands(out_rate_hz, packed, default_halfbands(out_rate_hz))
     }
 
+    /// The same for a radio running at `in_rate_hz` complex (an Airspy Mini
+    /// at 6 MS/s, its ADC at 12): the load stage and libairspy's half-band
+    /// do not depend on the rate (the firmware keeps the IF on fs/4), and
+    /// the half-bands after them are as many of the default as leave the
+    /// resampler a rate above its output. From 6 MS/s that is one for
+    /// 2.048 MS/s and none for 4.096; 8.192 is interpolated, 6 MS/s being
+    /// plenty for an ensemble 1.54 MHz wide.
+    pub fn for_input(in_rate_hz: u32, out_rate_hz: u32, packed: bool) -> Result<Self> {
+        let mut halfbands = default_halfbands(out_rate_hz);
+        while halfbands > 0
+            && f64::from(in_rate_hz) / f64::from(1u32 << halfbands) < f64::from(out_rate_hz) * 1.1
+        {
+            halfbands -= 1;
+        }
+        Self::build(in_rate_hz, out_rate_hz, packed, halfbands)
+    }
+
     pub fn with_halfbands(out_rate_hz: u32, packed: bool, halfbands: usize) -> Result<Self> {
+        Self::build(
+            crate::airspy_proto::IQ_RATE_HZ,
+            out_rate_hz,
+            packed,
+            halfbands,
+        )
+    }
+
+    fn build(in_rate_hz: u32, out_rate_hz: u32, packed: bool, halfbands: usize) -> Result<Self> {
         if !OUTPUT_RATES_HZ.contains(&out_rate_hz) {
             return Err(Error::Other(format!(
                 "Airspy: output rate {out_rate_hz} Hz is not one of 2.048, 4.096, 8.192 MS/s"
             )));
         }
-        let mut fs = f64::from(crate::airspy_proto::IQ_RATE_HZ);
+        let mut fs = f64::from(in_rate_hz);
         let mut stages = Vec::new();
         let mut cap = CHUNK_M;
         for _ in 0..halfbands {
@@ -408,7 +436,9 @@ impl IqConverter {
             fs /= 2.0;
             cap /= 2;
         }
-        if fs < f64::from(out_rate_hz) * 1.1 {
+        // With none, a rate below the output's is the resampler's to
+        // interpolate from (a Mini's 6 MS/s to 8.192).
+        if halfbands > 0 && fs < f64::from(out_rate_hz) * 1.1 {
             return Err(Error::Other(
                 "Airspy: too many half-bands for this output rate".into(),
             ));
@@ -422,8 +452,13 @@ impl IqConverter {
             cap /= 2;
         }
         links.push(Planes::new(resampler.t - 1, cap));
+        // The resampler's outputs for a block: more than its inputs when it
+        // interpolates (a Mini's 6 MS/s to 8.192).
+        let out_cap = (cap as f64 * f64::from(out_rate_hz) / fs).ceil() as usize;
+        let out_cap = out_cap.max(CHUNK_M) + 8;
         Ok(IqConverter {
             packed,
+            in_hz: in_rate_hz,
             out_hz: out_rate_hz,
             dc: ADC_MID,
             e: vec![0.0; E_HIST + CHUNK_M],
@@ -431,8 +466,8 @@ impl IqConverter {
             halfbands: stages,
             links,
             resampler,
-            out_i: vec![0.0; CHUNK_M + 8],
-            out_q: vec![0.0; CHUNK_M + 8],
+            out_i: vec![0.0; out_cap],
+            out_q: vec![0.0; out_cap],
             carry: [0; 16],
             carry_len: 0,
         })
@@ -492,7 +527,7 @@ impl IqConverter {
         let per_pair = self.unit() / 4;
         let pairs = (bytes.len() / per_pair) as u64;
         out.reserve(
-            (pairs * u64::from(self.out_hz) / u64::from(crate::airspy_proto::IQ_RATE_HZ)) as usize
+            (pairs * u64::from(self.out_hz) / u64::from(self.in_hz)) as usize
                 + 8,
         );
         for chunk in bytes.chunks(CHUNK_M * per_pair) {
@@ -1045,6 +1080,66 @@ mod tests {
             );
         }
         assert!(IqConverter::new(3_000_000, false).is_err());
+    }
+
+    /// An Airspy Mini: the ADC at 12 MS/s, the IF on 3 MHz, 6 MS/s complex
+    /// into the same converter. Each output rate has the tone where it was
+    /// sent, at its level, the ensemble flat, and the rate asked for.
+    #[test]
+    fn a_minis_6_ms_s_converts_to_every_output_rate() {
+        // `n` raw samples of an RF tone `delta` Hz off the centre, at 12 MS/s.
+        let mini_tone = |delta: f64, amp: f64, n: usize| -> Vec<u8> {
+            (0..n)
+                .flat_map(|k| {
+                    let x = 2048.0
+                        + 2048.0 * amp * (TAU * (3e6 - delta) * k as f64 / 12e6 + 0.3).cos();
+                    (x.round().clamp(0.0, 4095.0) as u16).to_le_bytes()
+                })
+                .collect()
+        };
+        let sign = if MIRROR_SPECTRUM { -1.0 } else { 1.0 };
+        for rate in OUTPUT_RATES_HZ {
+            let fs = f64::from(rate);
+            let run = |raw: &[u8]| {
+                let mut c = IqConverter::for_input(6_000_000, rate, false).unwrap();
+                let mut y = Vec::new();
+                c.process(raw, &mut y);
+                y
+            };
+            let n = 480_000;
+            let y = run(&mini_tone(0.05e6, 0.5, n));
+            let want = n as f64 / 12e6 * fs;
+            assert!(
+                (y.len() as f64 - want).abs() < 4.0,
+                "{rate}: {} samples, wanted {want}",
+                y.len()
+            );
+            let reference = Spectrum::of(&y, fs).peak().1;
+            assert!(
+                (reference - 0.5).abs() < 0.02,
+                "{rate}: amplitude {reference}"
+            );
+            for d in [-0.768e6, -0.5e6, 0.3e6, 0.768e6] {
+                let (f, a) = Spectrum::of(&run(&mini_tone(d, 0.5, n)), fs).peak();
+                assert!(
+                    (f - sign * d).abs() < 1.5 * fs / 32768.0,
+                    "{rate} Hz, RF offset {d}: landed at {f}"
+                );
+                let dev = 20.0 * (a / reference).log10();
+                assert!(dev.abs() < 0.1, "{rate} Hz at {d}: {dev} dB");
+            }
+            // A tone outside the ensemble that would fold onto it: gone.
+            let alias = fs - 0.4e6;
+            if alias < 2.9e6 {
+                let y = run(&mini_tone(alias, 0.5, n));
+                let (_, a) = Spectrum::of(&y[2000..], fs).peak();
+                let db = 20.0 * (a / 0.5).log10();
+                assert!(db < -50.0, "{rate}: alias at {db} dB");
+            }
+        }
+        // The R2's path is the default's; an output rate must be DAB's.
+        assert!(IqConverter::for_input(10_000_000, 4_096_000, false).is_ok());
+        assert!(IqConverter::for_input(6_000_000, 3_000_000, false).is_err());
     }
 
     #[test]

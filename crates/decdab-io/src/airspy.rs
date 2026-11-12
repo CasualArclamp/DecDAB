@@ -1,5 +1,5 @@
 // made by CasualArclamp
-//! Live Airspy R2 front end, in pure Rust over USB.
+//! Live Airspy R2 (and Airspy Mini) front end, in pure Rust over USB.
 //!
 //! Speaks the Airspy's USB vendor protocol (`airspy_proto`) through `nusb`,
 //! the same library the HackRF driver sits on: no libairspy, no libusb, no
@@ -183,7 +183,8 @@ pub struct AirspyInfo {
     pub board_id: u8,
     pub board_name: &'static str,
     pub firmware: String,
-    /// The sample rates it offers, Hz (the R2: 10 000 000 and 2 500 000).
+    /// The sample rates it offers, Hz (the R2: 10 000 000 and 2 500 000; a
+    /// Mini: 6 000 000 and 3 000 000).
     pub sample_rates: Vec<u32>,
 }
 
@@ -260,7 +261,19 @@ impl AirspySource {
 
         let dev = Arc::new(Inner::open()?);
         let rates = dev.sample_rates()?;
-        let steps = proto::start_sequence(&settings, proto::iq_rate_index(&rates)?)?;
+        // 10 MS/s on an R2; a Mini has 6 and 3, and runs at 6. The converter
+        // starts from whichever it is.
+        let (rate_index, iq_rate) = proto::iq_rate_index(&rates)?;
+        let converter = if iq_rate == proto::IQ_RATE_HZ {
+            converter
+        } else {
+            tracing::info!(
+                "Airspy: no 10 MS/s rate, running at {} MS/s",
+                f64::from(iq_rate) / 1e6
+            );
+            IqConverter::for_input(iq_rate, settings.sample_rate, settings.packed)?
+        };
+        let steps = proto::start_sequence(&settings, rate_index)?;
         dev.run(&steps)?;
 
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);

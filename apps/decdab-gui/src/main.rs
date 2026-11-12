@@ -395,7 +395,7 @@ impl SourceKind {
     fn label(self) -> &'static str {
         match self {
             SourceKind::HackRf => "HackRF",
-            SourceKind::Airspy => "Airspy R2",
+            SourceKind::Airspy => "Airspy R2 / Mini",
             SourceKind::RtlSdr => "RTL-SDR",
             SourceKind::Pluto => "Pluto / Pluto+",
             SourceKind::Network => "Network IQ",
@@ -1633,7 +1633,7 @@ impl App {
                 .width(90.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.kind, SourceKind::HackRf, "HackRF");
-                    ui.selectable_value(&mut self.kind, SourceKind::Airspy, "Airspy R2");
+                    ui.selectable_value(&mut self.kind, SourceKind::Airspy, "Airspy R2 / Mini");
                     ui.selectable_value(&mut self.kind, SourceKind::RtlSdr, "RTL-SDR");
                     ui.selectable_value(&mut self.kind, SourceKind::Pluto, "ADALM-PLUTO / Pluto+");
                     for k in Extra::ALL {

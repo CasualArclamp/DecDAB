@@ -27,7 +27,8 @@ pub const ENDPOINT_IN: u8 = 0x81;
 
 /// The IQ rate the R2 is run at: the ADC samples at twice this, 20 MS/s, and
 /// the bulk stream is that real signal (libairspy's `iqconverter` makes the
-/// 10 MS/s complex stream from it).
+/// 10 MS/s complex stream from it). An Airspy Mini has no such rate and is
+/// run at its nearest, 6 MS/s ([`iq_rate_index`]).
 pub const IQ_RATE_HZ: u32 = 10_000_000;
 
 /// The tuner's range (libairspy `airspy_set_freq`).
@@ -232,18 +233,18 @@ pub fn parse_sample_rates(reply: &[u8], count: u32) -> Result<Vec<u32>> {
         .collect())
 }
 
-/// The index of the 10 MS/s IQ rate in the device's list (the R2 lists
-/// 10 000 000 and 2 500 000).
-pub fn iq_rate_index(rates: &[u32]) -> Result<u16> {
+/// The rate to run the device at, as (index into its list, Hz): 10 MS/s
+/// where it is listed (the R2 lists 10 000 000 and 2 500 000), else the
+/// nearest to it (an Airspy Mini lists 6 000 000 and 3 000 000, so 6 MS/s),
+/// as DecSAT's Airspy front end chooses. The converter then starts from
+/// that rate (`IqConverter::for_input`).
+pub fn iq_rate_index(rates: &[u32]) -> Result<(u16, u32)> {
     rates
         .iter()
-        .position(|&r| r == IQ_RATE_HZ)
-        .map(|i| i as u16)
-        .ok_or_else(|| {
-            Error::Other(format!(
-                "Airspy: no 10 MS/s sample rate (the device offers {rates:?})"
-            ))
-        })
+        .enumerate()
+        .min_by_key(|&(_, &r)| r.abs_diff(IQ_RATE_HZ))
+        .map(|(i, &r)| (i as u16, r))
+        .ok_or_else(|| Error::Other("Airspy: the device lists no sample rates".into()))
 }
 
 /// The board's name from `BOARD_ID_READ` (libairspy `airspy_board_id_name`).
@@ -549,9 +550,21 @@ mod tests {
         reply.extend(2_500_000u32.to_le_bytes());
         let rates = parse_sample_rates(&reply, n).unwrap();
         assert_eq!(rates, [10_000_000, 2_500_000]);
-        assert_eq!(iq_rate_index(&rates).unwrap(), 0);
-        assert_eq!(iq_rate_index(&[2_500_000, 10_000_000]).unwrap(), 1);
-        assert!(iq_rate_index(&[2_500_000]).is_err());
+        assert_eq!(iq_rate_index(&rates).unwrap(), (0, 10_000_000));
+        assert_eq!(
+            iq_rate_index(&[2_500_000, 10_000_000]).unwrap(),
+            (1, 10_000_000)
+        );
+        // An Airspy Mini: its higher rate, wherever it is in the list.
+        assert_eq!(
+            iq_rate_index(&[6_000_000, 3_000_000]).unwrap(),
+            (0, 6_000_000)
+        );
+        assert_eq!(
+            iq_rate_index(&[3_000_000, 6_000_000]).unwrap(),
+            (1, 6_000_000)
+        );
+        assert!(iq_rate_index(&[]).is_err());
         assert!(parse_sample_rates(&reply[..7], n).is_err());
         assert!(parse_sample_rate_count(&[1, 0]).is_err());
         assert!(parse_sample_rate_count(&0u32.to_le_bytes()).is_err());
