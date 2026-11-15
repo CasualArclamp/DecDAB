@@ -316,7 +316,7 @@ fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([w as f32, h as f32])
         .with_min_inner_size([900.0, 560.0])
-        .with_title("DecDAB")
+        .with_title(concat!("DecDAB v", env!("CARGO_PKG_VERSION")))
         .with_drag_and_drop(true);
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
