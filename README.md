@@ -13,6 +13,11 @@ EN 301 234, TS 101 756) and ISO/IEC 11172-3, cited clause by clause in the
 source. CPU efficiency is the main design goal: a whole ensemble plus one
 service decodes in about 7–8 % of one core from a 4.096 MS/s recording.
 
+![DecDAB's main window: Band III spectrum and waterfall with block 11A selected, the ensemble card and service list, and the passive radar panel](docs/images/releases/v0.3.0/passive-radar.jpg)
+
+*The main window on a recording of block 11A: spectrum and waterfall, the
+ensemble card with its MER bar, the service list, and the passive radar panel.*
+
 ## Download
 
 Portable Windows builds (`decdab-gui.exe`, `decdab.exe`) are on the
@@ -39,6 +44,19 @@ download and run.
   the transmitters (TII) with their delays.
 - **Recording:** raw IQ captures, the playing service as MP3, a once-a-second
   reception log (CSV), window screenshots (F12).
+
+![Simple mode: the station's logo, name and Dynamic Label text, with previous, next, volume and record controls](docs/images/releases/v0.3.0/simple-mode.jpg)
+
+*Simple mode: just the station, its logo and its text.*
+
+<p align="center">
+  <img src="docs/images/hero.png" width="32%" alt="DAB+ radio in 8 % of one core: a whole ensemble plus one service">
+  <img src="docs/images/ensemble.png" width="32%" alt="Illustration of a DAB block: 1.536 MHz carrying every station of the ensemble">
+  <img src="docs/images/pipeline.png" width="32%" alt="The receive chain: radio or recorded IQ, OFDM front end, FIC, audio and text">
+</p>
+
+*Stills from the promo clip. The spectrum and waterfall in these three are
+illustrations, not captures.*
 
 ## Radios
 
