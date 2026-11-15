@@ -1,6 +1,8 @@
 <!-- made by CasualArclamp -->
 # DecDAB
 
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecDAB?logo=github&label=release)](https://github.com/CasualArclamp/DecDAB/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/DecDAB/total?logo=github&label=downloads)](https://github.com/CasualArclamp/DecDAB/releases)
+
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 A **DAB / DAB+ receiver** written in Rust, for the **HackRF One**, the **Airspy R2**
