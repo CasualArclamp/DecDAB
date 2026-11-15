@@ -613,14 +613,14 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decdab-audio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cpal",
 ]
 
 [[package]]
 name = "decdab-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-codecs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-fdk-sys",
  "rusty_mp3",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-data"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "flate2",
  "thiserror 2.0.21",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-dsp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
  "num-complex",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-audio",
  "decdab-codecs",
@@ -688,21 +688,21 @@ dependencies = [
 
 [[package]]
 name = "decdab-fdk-sys"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "decdab-fec"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
 ]
 
 [[package]]
 name = "decdab-fic"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "decdab-audio",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-io"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
  "decdab-dsp",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-msc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
  "decdab-fec",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "decdab-ofdm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "decdab-core",
  "decdab-dsp",
