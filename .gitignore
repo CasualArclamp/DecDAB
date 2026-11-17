@@ -11,3 +11,5 @@
 /captures
 *.wav
 __pycache__/
+# Notes for Claude Code sessions: local only
+CLAUDE.md
